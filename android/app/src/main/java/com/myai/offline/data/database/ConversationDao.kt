@@ -16,6 +16,9 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE id = :id LIMIT 1")
     suspend fun getConversationById(id: String): ConversationEntity?
 
+    @Query("UPDATE conversations SET title = :title, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateConversationTitle(id: String, title: String, updatedAt: Long = System.currentTimeMillis())
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertConversation(conversation: ConversationEntity)
 

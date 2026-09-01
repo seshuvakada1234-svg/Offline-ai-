@@ -26,21 +26,27 @@ class ModelManagerTest {
     fun testModelDefaultStateAndMetadata() {
         val qwen = ModelInfo(
             id = ModelId.QWEN3_1_7B,
-            name = "Qwen3 1.7B Instruct",
-            parameterSize = "1.7B",
-            quant = "Q4_K_M",
-            fileSizeBytes = 1_150_000_000L,
-            filename = "qwen3-1.7b-instruct-q4_k_m.gguf",
-            downloadUrl = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            name = "Qwen3 1.7B",
+            tag = "Fast Assistant (Default)",
             description = "Fast, lightweight local on-device LLM with Telugu & English capabilities.",
+            sizeFormatted = "1.18 GB",
+            sizeBytes = 1266679808L,
+            isDefault = true,
+            sha256Expected = "9a4f218c347b0e3568c09a842183e29f032e1858a74e9b98031d234ea576ef12",
+            filename = "qwen3-1.7b-instruct-q4_k_m.gguf",
+            sourceUrl = "https://huggingface.co/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf",
+            contextSize = 4096,
+            quant = "Q4_K_M",
+            backend = "llama.cpp",
+            architecture = "qwen3",
             state = ModelState.READY,
-            progress = 1.0f
+            progress = 100
         )
 
-        assertEquals("Qwen3 1.7B Instruct", qwen.name)
+        assertEquals("Qwen3 1.7B", qwen.name)
         assertEquals("Q4_K_M", qwen.quant)
         assertEquals(ModelState.READY, qwen.state)
-        assertEquals(1.0f, qwen.progress, 0.001f)
+        assertEquals(1.0f, qwen.downloadProgress, 0.001f)
         assertFalse(qwen.filename.isEmpty())
     }
 
@@ -71,23 +77,33 @@ class ModelManagerTest {
             ModelInfo(
                 id = ModelId.QWEN3_1_7B,
                 name = "Qwen3 1.7B",
-                parameterSize = "1.7B",
-                quant = "Q4_K_M",
-                fileSizeBytes = 1_150_000_000L,
-                filename = "qwen3-1.7b.gguf",
-                downloadUrl = "",
+                tag = "Fast Assistant",
                 description = "",
+                sizeFormatted = "1.18 GB",
+                sizeBytes = 1150000000L,
+                sha256Expected = "",
+                filename = "qwen3-1.7b.gguf",
+                sourceUrl = "",
+                contextSize = 4096,
+                quant = "Q4_K_M",
+                backend = "llama.cpp",
+                architecture = "qwen3",
                 state = ModelState.READY
             ),
             ModelInfo(
                 id = ModelId.PHI4_MINI,
                 name = "Phi-4 Mini",
-                parameterSize = "3.8B",
-                quant = "Q4_K_M",
-                fileSizeBytes = 2_400_000_000L,
-                filename = "phi-4-mini.gguf",
-                downloadUrl = "",
+                tag = "Coding",
                 description = "",
+                sizeFormatted = "2.31 GB",
+                sizeBytes = 2400000000L,
+                sha256Expected = "",
+                filename = "phi-4-mini.gguf",
+                sourceUrl = "",
+                contextSize = 4096,
+                quant = "Q4_K_M",
+                backend = "llama.cpp",
+                architecture = "phi4",
                 state = ModelState.NOT_INSTALLED
             )
         )

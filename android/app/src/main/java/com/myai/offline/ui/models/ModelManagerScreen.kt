@@ -223,7 +223,7 @@ fun ModelManagerScreen(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             LinearProgressIndicator(
-                                progress = { model.downloadProgress },
+                                progress = model.downloadProgress,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(6.dp)

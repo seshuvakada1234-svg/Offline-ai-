@@ -21,12 +21,12 @@ class ChatDatabaseTest {
             title = "Telugu Songs Query",
             createdAt = timestamp,
             updatedAt = timestamp,
-            selectedModel = "qwen3_1.7b"
+            selectedModelId = "qwen3-1.7b"
         )
 
         assertEquals(convId, conv.id)
         assertEquals("Telugu Songs Query", conv.title)
-        assertEquals("qwen3_1.7b", conv.selectedModel)
+        assertEquals("qwen3-1.7b", conv.selectedModelId)
         assertEquals(timestamp, conv.createdAt)
     }
 

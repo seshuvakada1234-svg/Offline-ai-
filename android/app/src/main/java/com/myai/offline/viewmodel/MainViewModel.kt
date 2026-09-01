@@ -9,7 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.myai.offline.actions.ActionParser
 import com.myai.offline.actions.AndroidActionHandler
-import com.myai.offline.data.database.ConversationDatabase
+import com.myai.offline.data.database.AppDatabase
 import com.myai.offline.data.database.ConversationEntity
 import com.myai.offline.data.database.MessageEntity
 import com.myai.offline.data.model.AssistantAction
@@ -38,8 +38,9 @@ import java.util.UUID
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val TAG = "MainViewModel"
-    private val db = ConversationDatabase.getDatabase(application)
+    private val db = AppDatabase.getInstance(application)
     private val conversationDao = db.conversationDao()
+    private val messageDao = db.messageDao()
     private val modelRepository = ModelRepository(application)
     private val llmEngine = LocalLLMEngine(application)
     private val whisperEngine = WhisperEngine(application)
@@ -113,7 +114,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val conv = ConversationEntity(
                 id = newId,
                 title = "New Chat",
-                selectedModel = _selectedModelId.value.key
+                selectedModelId = _selectedModelId.value.rawValue
             )
             conversationDao.insertConversation(conv)
         }
@@ -122,7 +123,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectConversation(id: String) {
         _currentConversationId.value = id
         viewModelScope.launch {
-            conversationDao.getMessagesForConversation(id).collect { list ->
+            messageDao.getMessagesForConversation(id).collect { list: List<MessageEntity> ->
                 _messages.value = list
             }
         }
@@ -153,7 +154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         viewModelScope.launch(Dispatchers.IO) {
-            conversationDao.insertMessage(userMessage)
+            messageDao.insertMessage(userMessage)
 
             // Update conversation title if first message
             if (_messages.value.isEmpty()) {
@@ -212,7 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 metricsJson = metricsJson
             )
 
-            conversationDao.insertMessage(aiMessage)
+            messageDao.insertMessage(aiMessage)
             _isGenerating.value = false
             _streamingMessage.value = ""
 

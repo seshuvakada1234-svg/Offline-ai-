@@ -97,6 +97,18 @@ class ModelRepository(
         return File(dir, filename)
     }
 
+    fun getModel(id: ModelId): ModelInfo? {
+        return _models.value.firstOrNull { it.id == id }
+    }
+
+    fun downloadModel(id: ModelId) {
+        startDownload(id)
+    }
+
+    fun checkLocalModelFiles() {
+        loadSavedStates()
+    }
+
     fun selectModel(id: ModelId): Boolean {
         val model = _models.value.firstOrNull { it.id == id } ?: return false
         if (model.state != ModelState.READY) return false

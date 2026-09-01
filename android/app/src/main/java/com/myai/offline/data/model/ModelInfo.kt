@@ -40,13 +40,17 @@ data class ModelInfo(
     val quant: String,
     val backend: String, // "llama.cpp" or "whisper.cpp"
     val architecture: String,
+    val ramRequired: String = "1.5 GB",
     val downloadSpeed: String? = null,
     val progress: Int = 0,
     val downloadedBytes: Long = 0L,
     val state: ModelState = ModelState.NOT_INSTALLED,
     val errorMessage: String? = null,
     val isLoaded: Boolean = false
-)
+) {
+    val downloadProgress: Float
+        get() = progress.toFloat() / 100f
+}
 
 object ModelConstants {
     const val TOTAL_DEVICE_STORAGE_BYTES: Long = 64L * 1024L * 1024L * 1024L // 64 GB
