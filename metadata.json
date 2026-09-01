@@ -1,0 +1,10 @@
+{
+  "name": "MyAI Offline Voice Assistant",
+  "description": "An offline voice and text AI assistant featuring local LLM inference, Whisper STT, Text-to-Speech, and smart Android intent action handling.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
