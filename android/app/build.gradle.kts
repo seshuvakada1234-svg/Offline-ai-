@@ -24,10 +24,12 @@ android {
             abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64"))
         }
 
-        externalNativeBuild {
-            cmake {
-                cppFlags.addAll(listOf("-std=c++17", "-O3", "-fexceptions", "-frtti"))
-                arguments.addAll(listOf("-DANDROID_STL=c++_shared"))
+        if (project.hasProperty("includeNative") || project.rootProject.file("local.properties").readText().contains("ndk.dir")) {
+            externalNativeBuild {
+                cmake {
+                    cppFlags.addAll(listOf("-std=c++17", "-O3", "-fexceptions", "-frtti"))
+                    arguments.addAll(listOf("-DANDROID_STL=c++_shared"))
+                }
             }
         }
     }
@@ -74,10 +76,12 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+    if (project.hasProperty("includeNative") || project.rootProject.file("local.properties").readText().contains("ndk.dir")) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 }

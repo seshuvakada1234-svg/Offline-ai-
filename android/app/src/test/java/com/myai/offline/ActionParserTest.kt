@@ -5,13 +5,14 @@ import com.myai.offline.data.model.AssistantActionType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActionParserTest {
 
     @Test
-    fun testParseCodeFencedJsonAction() {
+    fun testParseCodeFencedJsonSearchYouTubeAction() {
         val rawLlmOutput = """
             Sure, I am searching for Telugu songs on YouTube.
             ```json
@@ -33,7 +34,7 @@ class ActionParserTest {
     }
 
     @Test
-    fun testParseInlineJsonAction() {
+    fun testParseInlineJsonOpenSettingsAction() {
         val rawLlmOutput = "Opening settings now. {\"action\": \"OPEN_SETTINGS\"}"
 
         val result = ActionParser.parse(rawLlmOutput)
@@ -63,12 +64,11 @@ class ActionParserTest {
     }
 
     @Test
-    fun testParseMakeCallRequiresConfirmation() {
+    fun testParseOpenChromeAction() {
         val rawLlmOutput = """
             ```json
             {
-              "action": "MAKE_CALL",
-              "phoneNumber": "+1234567890"
+              "action": "OPEN_CHROME"
             }
             ```
         """.trimIndent()
@@ -76,9 +76,41 @@ class ActionParserTest {
         val result = ActionParser.parse(rawLlmOutput)
 
         assertTrue(result.hasAction)
-        assertEquals(AssistantActionType.MAKE_CALL, result.action?.type)
-        assertEquals("+1234567890", result.action?.phoneNumber)
-        assertTrue(result.action?.requiresConfirmation == true)
+        assertEquals(AssistantActionType.OPEN_CHROME, result.action?.type)
+    }
+
+    @Test
+    fun testMalformedJsonHandling() {
+        val rawLlmOutput = """
+            Opening app...
+            ```json
+            { "action": "SEARCH_YOUTUBE", "query": 
+            ```
+        """.trimIndent()
+
+        val result = ActionParser.parse(rawLlmOutput)
+
+        assertFalse(result.hasAction)
+        assertTrue(result.isMalformed)
+        assertNull(result.action)
+    }
+
+    @Test
+    fun testInvalidUnknownActionType() {
+        val rawLlmOutput = """
+            ```json
+            {
+              "action": "EXECUTE_ARBITRARY_SHELL",
+              "command": "rm -rf /"
+            }
+            ```
+        """.trimIndent()
+
+        val result = ActionParser.parse(rawLlmOutput)
+
+        assertFalse(result.hasAction)
+        assertTrue(result.isMalformed)
+        assertNull(result.action)
     }
 
     @Test
