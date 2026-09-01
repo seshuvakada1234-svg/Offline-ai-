@@ -86,9 +86,9 @@ class LocalLLMEngine(
         }
     }
 
-    fun formatPrompt(
+    override fun formatPrompt(
         modelId: ModelId,
-        systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
+        systemPrompt: String,
         conversationHistory: List<Pair<String, String>>, // role to content
         userQuery: String
     ): String {
@@ -137,11 +137,11 @@ class LocalLLMEngine(
     /**
      * Streams generated tokens asynchronously. Emits token chunks and reports metrics upon completion.
      */
-    fun generateStreaming(
+    override fun generateStreaming(
         prompt: String,
         userQuery: String,
-        maxTokens: Int = 1024,
-        onMetricsCalculated: (InferenceMetrics) -> Unit = {}
+        maxTokens: Int,
+        onMetricsCalculated: (InferenceMetrics) -> Unit
     ): Flow<String> = flow {
         isGenerating.set(true)
         val startTime = System.currentTimeMillis()

@@ -42,7 +42,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val conversationDao = db.conversationDao()
     private val messageDao = db.messageDao()
     private val modelRepository = ModelRepository(application)
-    private val llmEngine = LocalLLMEngine(application)
+    private val llmEngine: ILocalLLMEngine = LocalLLMEngine(application)
     private val whisperEngine = WhisperEngine(application)
     private val audioRecorder = AudioRecorder(application)
     private val actionHandler = AndroidActionHandler(application)
