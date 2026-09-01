@@ -18,28 +18,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
-interface ILocalLLMEngine {
-    val isModelLoaded: Boolean
-    val currentLoadedModel: ModelInfo?
-    suspend fun loadModel(model: ModelInfo, threads: Int = 4, ctxSize: Int = 4096): Long
-    suspend fun unloadModel()
-    fun stopGeneration()
-    fun formatPrompt(
-        modelId: ModelId,
-        systemPrompt: String = LocalLLMEngine.DEFAULT_SYSTEM_PROMPT,
-        conversationHistory: List<Pair<String, String>>,
-        userQuery: String
-    ): String
-    fun generateStreaming(
-        prompt: String,
-        userQuery: String,
-        maxTokens: Int = 1024,
-        onMetricsCalculated: (InferenceMetrics) -> Unit = {}
-    ): Flow<String>
-}
-
 class LocalLLMEngine(
-    private val context: Context? = null
+    private val context: Context
 ) : ILocalLLMEngine {
     private val TAG = "LocalLLMEngine"
     private var activeModelHandle: Long = 0L
@@ -53,7 +33,7 @@ class LocalLLMEngine(
     override val currentLoadedModel: ModelInfo?
         get() = loadedModel
 
-    override suspend fun loadModel(model: ModelInfo, threads: Int = 4, ctxSize: Int = 4096): Long =
+    override suspend fun loadModel(model: ModelInfo, threads: Int, ctxSize: Int): Long =
         withContext(Dispatchers.IO) {
             val startTime = System.currentTimeMillis()
             Log.i(TAG, "Loading model: ${model.name} (${model.quant})")
@@ -63,11 +43,7 @@ class LocalLLMEngine(
                 unloadModel()
             }
 
-            val modelFile = if (context != null) {
-                File(context.filesDir, "models/${model.filename}")
-            } else {
-                File("/tmp/models/${model.filename}")
-            }
+            val modelFile = File(context.filesDir, "models/${model.filename}")
 
             if (NativeLlamaBridge.isAvailable() && modelFile.exists()) {
                 activeModelHandle = NativeLlamaBridge.nativeLoadModel(
@@ -86,15 +62,17 @@ class LocalLLMEngine(
             loadDuration
         }
 
-    override suspend fun unloadModel() = withContext(Dispatchers.IO) {
-        if (activeModelHandle != 0L) {
-            if (NativeLlamaBridge.isAvailable()) {
-                NativeLlamaBridge.nativeUnloadModel(activeModelHandle)
+    override suspend fun unloadModel() {
+        withContext(Dispatchers.IO) {
+            if (activeModelHandle != 0L) {
+                if (NativeLlamaBridge.isAvailable()) {
+                    NativeLlamaBridge.nativeUnloadModel(activeModelHandle)
+                }
+                activeModelHandle = 0L
             }
-            activeModelHandle = 0L
+            loadedModel = null
+            Log.i(TAG, "Model unloaded successfully")
         }
-        loadedModel = null
-        Log.i(TAG, "Model unloaded successfully")
     }
 
     override fun stopGeneration() {
@@ -108,9 +86,9 @@ class LocalLLMEngine(
         }
     }
 
-    override fun formatPrompt(
+    fun formatPrompt(
         modelId: ModelId,
-        systemPrompt: String,
+        systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
         conversationHistory: List<Pair<String, String>>, // role to content
         userQuery: String
     ): String {
@@ -159,11 +137,11 @@ class LocalLLMEngine(
     /**
      * Streams generated tokens asynchronously. Emits token chunks and reports metrics upon completion.
      */
-    override fun generateStreaming(
+    fun generateStreaming(
         prompt: String,
         userQuery: String,
-        maxTokens: Int,
-        onMetricsCalculated: (InferenceMetrics) -> Unit
+        maxTokens: Int = 1024,
+        onMetricsCalculated: (InferenceMetrics) -> Unit = {}
     ): Flow<String> = flow {
         isGenerating.set(true)
         val startTime = System.currentTimeMillis()

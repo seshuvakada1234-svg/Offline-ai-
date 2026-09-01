@@ -148,7 +148,7 @@ fun HistoryDrawer(
             items(conversations) { conv ->
                 val isSelected = conv.id == activeConversationId
                 val itemShape = RoundedCornerShape(10.dp)
-                val dateStr = SimpleDateFormat("MMM dd", Locale.getDefault()).format(Date(conv.timestamp))
+                val dateStr = SimpleDateFormat("MMM dd", Locale.getDefault()).format(Date(conv.updatedAt))
 
                 Row(
                     modifier = Modifier

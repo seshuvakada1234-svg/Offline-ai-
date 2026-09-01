@@ -107,7 +107,7 @@ class AndroidActionHandler(private val context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
-        ExecutionOutcome(true, "Opening Android system settings.", "Settings")
+        return ExecutionOutcome(true, "Opening Android system settings.", "Settings")
     }
 
     private fun openUrl(urlStr: String): ExecutionOutcome {
