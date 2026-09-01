@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MyAI</string>
+    <string name="app_subtitle">Private Offline AI Assistant</string>
+    <string name="default_model_name">Qwen3 1.7B</string>
+</resources>
