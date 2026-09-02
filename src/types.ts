@@ -80,6 +80,7 @@ export type EngineLogTag =
   | 'INFERENCE_START'
   | 'FIRST_TOKEN'
   | 'INFERENCE_END'
+  | 'INFERENCE_HALT'
   | 'ACTION_PARSED'
   | 'ACTION_EXECUTED'
   | 'VOICE_START'

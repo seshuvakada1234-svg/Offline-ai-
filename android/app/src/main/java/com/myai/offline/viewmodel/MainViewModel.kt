@@ -117,6 +117,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var messageCollectionJob: Job? = null
+
     fun createNewConversation() {
         val newId = UUID.randomUUID().toString()
         _currentConversationId.value = newId
@@ -130,11 +132,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             conversationDao.insertConversation(conv)
         }
+        observeConversation(newId)
     }
 
     fun selectConversation(id: String) {
         _currentConversationId.value = id
-        viewModelScope.launch {
+        observeConversation(id)
+    }
+
+    private fun observeConversation(id: String) {
+        messageCollectionJob?.cancel()
+        messageCollectionJob = viewModelScope.launch {
             messageDao.getMessagesForConversation(id).collect { list: List<MessageEntity> ->
                 _messages.value = list
             }
@@ -193,56 +201,106 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _streamingMessage.value = ""
 
         activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
-            val history = _messages.value.map { it.role to it.content }
-            val prompt = llmEngine.formatPrompt(
-                modelId = _selectedModelId.value,
-                conversationHistory = history,
-                userQuery = userQuery
-            )
-
-            val stringBuffer = StringBuilder()
-            var calculatedMetrics: InferenceMetrics? = null
-
-            llmEngine.generateStreaming(
-                prompt = prompt,
-                userQuery = userQuery,
-                maxTokens = 1024,
-                onMetricsCalculated = { metrics: InferenceMetrics ->
-                    calculatedMetrics = metrics
+            try {
+                // Ensure model is ready
+                val selectedModel = modelRepository.getModel(_selectedModelId.value)
+                if (selectedModel == null || selectedModel.state != ModelState.READY) {
+                    val errorText = "Unable to generate a response.\n\nModel ${selectedModel?.name ?: "selected"} is not installed. Please download it from the Model Manager."
+                    val errorMsgEntity = MessageEntity(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = convId,
+                        role = "assistant",
+                        content = errorText
+                    )
+                    messageDao.insertMessage(errorMsgEntity)
+                    _isGenerating.value = false
+                    _streamingMessage.value = ""
+                    return@launch
                 }
-            ).collect { tokenChunk: String ->
-                stringBuffer.append(tokenChunk)
-                _streamingMessage.value = stringBuffer.toString()
-            }
 
-            val finalContent = stringBuffer.toString()
-            val aiMessageId = UUID.randomUUID().toString()
+                if (!llmEngine.isModelLoaded || llmEngine.currentLoadedModel?.id != _selectedModelId.value) {
+                    try {
+                        llmEngine.loadModel(selectedModel)
+                    } catch (e: Exception) {
+                        val errorText = "Failed to load ${selectedModel.name}: ${e.localizedMessage ?: "File error"}.\nPlease verify the model file in Model Manager."
+                        val errorMsgEntity = MessageEntity(
+                            id = UUID.randomUUID().toString(),
+                            conversationId = convId,
+                            role = "assistant",
+                            content = errorText
+                        )
+                        messageDao.insertMessage(errorMsgEntity)
+                        _isGenerating.value = false
+                        _streamingMessage.value = ""
+                        return@launch
+                    }
+                }
 
-            val metricsJson = calculatedMetrics?.let {
-                JSONObject().apply {
-                    put("timeToFirstTokenMs", it.timeToFirstTokenMs)
-                    put("tokensPerSec", it.tokensPerSec)
-                    put("totalTokens", it.totalTokens)
-                    put("totalGenTimeMs", it.totalGenTimeMs)
-                }.toString()
-            }
+                val history = _messages.value.map { it.role to it.content }
+                val prompt = llmEngine.formatPrompt(
+                    modelId = _selectedModelId.value,
+                    conversationHistory = history,
+                    userQuery = userQuery
+                )
 
-            val aiMessage = MessageEntity(
-                id = aiMessageId,
-                conversationId = convId,
-                role = "assistant",
-                content = finalContent,
-                metricsJson = metricsJson
-            )
+                val stringBuffer = StringBuilder()
+                var calculatedMetrics: InferenceMetrics? = null
 
-            messageDao.insertMessage(aiMessage)
-            _isGenerating.value = false
-            _streamingMessage.value = ""
+                llmEngine.generateStreaming(
+                    prompt = prompt,
+                    userQuery = userQuery,
+                    maxTokens = 1024,
+                    onMetricsCalculated = { metrics: InferenceMetrics ->
+                        calculatedMetrics = metrics
+                    }
+                ).collect { tokenChunk: String ->
+                    stringBuffer.append(tokenChunk)
+                    _streamingMessage.value = stringBuffer.toString()
+                }
 
-            // Check if there is an automatic action to execute immediately
-            val parseResult = ActionParser.parse(finalContent)
-            if (parseResult.hasAction && parseResult.action != null && !parseResult.action.requiresConfirmation) {
-                executeAction(parseResult.action)
+                val finalContent = stringBuffer.toString()
+                if (finalContent.isNotBlank()) {
+                    val aiMessageId = UUID.randomUUID().toString()
+
+                    val metricsJson = calculatedMetrics?.let {
+                        JSONObject().apply {
+                            put("timeToFirstTokenMs", it.timeToFirstTokenMs)
+                            put("tokensPerSec", it.tokensPerSec)
+                            put("totalTokens", it.totalTokens)
+                            put("totalGenTimeMs", it.totalGenTimeMs)
+                        }.toString()
+                    }
+
+                    val aiMessage = MessageEntity(
+                        id = aiMessageId,
+                        conversationId = convId,
+                        role = "assistant",
+                        content = finalContent,
+                        metricsJson = metricsJson
+                    )
+
+                    messageDao.insertMessage(aiMessage)
+
+                    // Check if there is an automatic action to execute immediately
+                    val parseResult = ActionParser.parse(finalContent)
+                    if (parseResult.hasAction && parseResult.action != null && !parseResult.action.requiresConfirmation) {
+                        executeAction(parseResult.action)
+                    }
+                }
+            } catch (e: Exception) {
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    val errorMsg = "Generation failed: ${e.localizedMessage ?: "Unexpected inference error"}"
+                    val errorEntity = MessageEntity(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = convId,
+                        role = "assistant",
+                        content = errorMsg
+                    )
+                    messageDao.insertMessage(errorEntity)
+                }
+            } finally {
+                _isGenerating.value = false
+                _streamingMessage.value = ""
             }
         }
     }
@@ -250,6 +308,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopGeneration() {
         llmEngine.stopGeneration()
         activeGenerationJob?.cancel()
+        val partialContent = _streamingMessage.value
+        val convId = _currentConversationId.value
+        if (partialContent.isNotBlank() && convId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val aiMessage = MessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = convId,
+                    role = "assistant",
+                    content = partialContent
+                )
+                messageDao.insertMessage(aiMessage)
+            }
+        }
         _isGenerating.value = false
         _streamingMessage.value = ""
     }

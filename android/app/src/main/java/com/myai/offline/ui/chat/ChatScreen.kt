@@ -1,5 +1,8 @@
 package com.myai.offline.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,26 +27,26 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerState
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,13 +65,16 @@ import com.myai.offline.data.database.MessageEntity
 import com.myai.offline.data.model.AssistantAction
 import com.myai.offline.data.model.ModelId
 import com.myai.offline.data.model.ModelInfo
+import com.myai.offline.data.model.ModelState
 import com.myai.offline.data.model.VoiceState
 import com.myai.offline.ui.components.MessageItem
 import com.myai.offline.ui.components.ModelSelectorSheet
 import com.myai.offline.ui.components.VoiceOverlay
 import com.myai.offline.ui.theme.AccentAmber
+import com.myai.offline.ui.theme.AccentRose
 import com.myai.offline.ui.theme.AccentTeal
 import com.myai.offline.ui.theme.BgDark
+import com.myai.offline.ui.theme.BorderLight
 import com.myai.offline.ui.theme.BorderSubtle
 import com.myai.offline.ui.theme.PrimaryIndigo
 import com.myai.offline.ui.theme.SurfaceCard
@@ -109,14 +115,19 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
 
     val currentModel = models.firstOrNull { it.id == selectedModelId }
+    val isModelReady = currentModel?.state == ModelState.READY
 
-    // Scroll to bottom when new messages arrive or while streaming
-    LaunchedEffect(messages.size, streamingMessage) {
-        if (messages.isNotEmpty() || streamingMessage.isNotEmpty()) {
-            val totalItems = messages.size + if (streamingMessage.isNotEmpty()) 1 else 0
-            if (totalItems > 0) {
-                listState.animateScrollToItem(totalItems - 1)
-            }
+    // Auto-scroll when new message arrives or streaming updates
+    val totalCount = messages.size + if (isGenerating) 1 else 0
+    LaunchedEffect(messages.size, streamingMessage, isGenerating) {
+        if (totalCount > 0) {
+            listState.animateScrollToItem(totalCount - 1)
+        }
+    }
+
+    val showScrollToBottom by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex < totalCount - 3 && totalCount > 3
         }
     }
 
@@ -124,7 +135,7 @@ fun ChatScreen(
         Scaffold(
             containerColor = BgDark,
             topBar = {
-                // Custom Sleek App Header
+                // ChatGPT-style Top Navigation Header
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -136,10 +147,14 @@ fun ChatScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Menu", tint = TextPrimary)
+                            Icon(
+                                imageVector = Icons.Default.Menu,
+                                contentDescription = "Open navigation menu",
+                                tint = TextPrimary
+                            )
                         }
 
-                        // Model Chip Selector
+                        // Model Selector Pill
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(20.dp))
@@ -152,7 +167,7 @@ fun ChatScreen(
                                 Icon(
                                     imageVector = Icons.Default.ElectricBolt,
                                     contentDescription = null,
-                                    tint = PrimaryIndigo,
+                                    tint = if (isModelReady) PrimaryIndigo else AccentAmber,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -165,7 +180,7 @@ fun ChatScreen(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Icon(
                                     imageVector = Icons.Default.KeyboardArrowDown,
-                                    contentDescription = null,
+                                    contentDescription = "Select model",
                                     tint = TextSecondary,
                                     modifier = Modifier.size(16.dp)
                                 )
@@ -173,24 +188,24 @@ fun ChatScreen(
                         }
                     }
 
-                    // Offline Badge
+                    // On-device Status Indicator
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(12.dp))
-                            .background(AccentTeal.copy(alpha = 0.15f))
+                            .background(if (isModelReady) AccentTeal.copy(alpha = 0.12f) else AccentAmber.copy(alpha = 0.12f))
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Lock,
-                            contentDescription = "Offline Guarantee",
-                            tint = AccentTeal,
+                            contentDescription = "Offline On-Device AI",
+                            tint = if (isModelReady) AccentTeal else AccentAmber,
                             modifier = Modifier.size(12.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Offline",
-                            color = AccentTeal,
+                            text = if (isModelReady) "Offline" else "Download needed",
+                            color = if (isModelReady) AccentTeal else AccentAmber,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -198,53 +213,54 @@ fun ChatScreen(
                 }
             },
             bottomBar = {
-                // Bottom Input Area
+                // ChatGPT-style Bottom Composer
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(SurfaceDark)
                         .navigationBarsPadding()
                         .imePadding()
-                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(24.dp))
+                            .clip(RoundedCornerShape(26.dp))
                             .background(SurfaceCard)
-                            .border(1.dp, BorderSubtle, RoundedCornerShape(24.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .border(1.dp, BorderSubtle, RoundedCornerShape(26.dp))
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Mic Button
+                        // Plus / Prompt Suggestions button
                         IconButton(
-                            onClick = onStartVoice,
-                            modifier = Modifier.size(38.dp)
+                            onClick = { showModelSheet = true },
+                            modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Voice Input",
-                                tint = AccentTeal,
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Attach or select model",
+                                tint = TextSecondary,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
 
-                        // Text Field
+                        // Multiline Text Field
                         BasicTextField(
                             value = inputText,
                             onValueChange = { inputText = it },
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
+                                .padding(horizontal = 6.dp, vertical = 8.dp),
                             textStyle = TextStyle(
                                 color = TextPrimary,
-                                fontSize = 14.sp
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
                             ),
                             cursorBrush = SolidColor(PrimaryIndigo),
                             decorationBox = { innerTextField ->
                                 if (inputText.isEmpty()) {
                                     Text(
-                                        text = "Ask anything or command actions...",
+                                        text = if (isGenerating) "Generating response..." else "Ask anything...",
                                         color = TextMuted,
                                         fontSize = 14.sp
                                     )
@@ -253,40 +269,54 @@ fun ChatScreen(
                             }
                         )
 
-                        // Send / Stop button
+                        // Voice Mic Button
+                        IconButton(
+                            onClick = onStartVoice,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Voice input",
+                                tint = if (voiceState != VoiceState.IDLE) AccentTeal else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Dynamic Send / Stop Button
                         if (isGenerating) {
                             IconButton(
                                 onClick = onStopGeneration,
                                 modifier = Modifier
-                                    .size(38.dp)
+                                    .size(36.dp)
                                     .clip(CircleShape)
-                                    .background(AccentAmber)
+                                    .background(AccentRose)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Stop,
-                                    contentDescription = "Stop",
+                                    contentDescription = "Stop generation",
                                     tint = Color.White,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
                         } else {
+                            val canSend = inputText.isNotBlank()
                             IconButton(
                                 onClick = {
-                                    if (inputText.isNotBlank()) {
+                                    if (canSend) {
                                         onSendMessage(inputText)
                                         inputText = ""
                                     }
                                 },
-                                enabled = inputText.isNotBlank(),
+                                enabled = canSend,
                                 modifier = Modifier
-                                    .size(38.dp)
+                                    .size(36.dp)
                                     .clip(CircleShape)
-                                    .background(if (inputText.isNotBlank()) PrimaryIndigo else Color.Transparent)
+                                    .background(if (canSend) PrimaryIndigo else Color(0xFF2A2A35))
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.ArrowUpward,
-                                    contentDescription = "Send",
-                                    tint = if (inputText.isNotBlank()) Color.White else TextMuted,
+                                    contentDescription = "Send message",
+                                    tint = if (canSend) Color.White else TextMuted,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -300,9 +330,10 @@ fun ChatScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                if (messages.isEmpty() && streamingMessage.isEmpty()) {
-                    // Empty State with Starter Prompts
+                if (messages.isEmpty() && !isGenerating) {
+                    // Modern Empty State
                     EmptyChatSuggestions(
+                        selectedModelName = currentModel?.name ?: "Qwen3 1.7B",
                         onSelectSuggestion = { suggestion ->
                             onSendMessage(suggestion)
                         }
@@ -312,13 +343,15 @@ fun ChatScreen(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         items(messages, key = { it.id }) { message ->
                             MessageItem(
                                 message = message,
                                 isSpeakingThis = isSpeaking && currentlySpeakingMessageId == message.id,
+                                modelName = currentModel?.name ?: "Qwen3 1.7B",
+                                isThinking = false,
                                 onSpeakClick = { content -> onSpeakMessage(message.id, content) },
                                 onStopSpeakClick = onStopSpeaking,
                                 onActionConfirm = onActionConfirm,
@@ -326,17 +359,19 @@ fun ChatScreen(
                             )
                         }
 
-                        // Active streaming token chunk
-                        if (streamingMessage.isNotEmpty()) {
-                            item {
+                        // Real Streaming Active Item
+                        if (isGenerating) {
+                            item(key = "active_streaming_item") {
                                 MessageItem(
                                     message = MessageEntity(
-                                        id = "streaming_temp",
+                                        id = "streaming_active_id",
                                         conversationId = "",
                                         role = "assistant",
                                         content = streamingMessage
                                     ),
                                     isSpeakingThis = false,
+                                    modelName = currentModel?.name ?: "Qwen3 1.7B",
+                                    isThinking = streamingMessage.isEmpty(),
                                     onSpeakClick = {},
                                     onStopSpeakClick = {},
                                     onActionConfirm = {},
@@ -346,10 +381,41 @@ fun ChatScreen(
                         }
                     }
                 }
+
+                // Scroll to Bottom Floating Button
+                AnimatedVisibility(
+                    visible = showScrollToBottom,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 16.dp)
+                ) {
+                    FloatingActionButton(
+                        onClick = {
+                            scope.launch {
+                                if (totalCount > 0) {
+                                    listState.animateScrollToItem(totalCount - 1)
+                                }
+                            }
+                        },
+                        containerColor = SurfaceCard,
+                        contentColor = TextPrimary,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .border(1.dp, BorderLight, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowDownward,
+                            contentDescription = "Scroll to bottom",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
             }
         }
 
-        // Model Selector Modal Bottom Sheet
+        // Model Selector Bottom Sheet
         if (showModelSheet) {
             ModelSelectorSheet(
                 models = models,
@@ -375,6 +441,7 @@ fun ChatScreen(
 
 @Composable
 private fun EmptyChatSuggestions(
+    selectedModelName: String,
     onSelectSuggestion: (String) -> Unit
 ) {
     Column(
@@ -386,7 +453,7 @@ private fun EmptyChatSuggestions(
     ) {
         Box(
             modifier = Modifier
-                .size(60.dp)
+                .size(54.dp)
                 .clip(CircleShape)
                 .background(PrimaryIndigo.copy(alpha = 0.15f))
                 .border(1.dp, PrimaryIndigo.copy(alpha = 0.3f), CircleShape),
@@ -396,7 +463,7 @@ private fun EmptyChatSuggestions(
                 imageVector = Icons.Default.SmartToy,
                 contentDescription = null,
                 tint = PrimaryIndigo,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(28.dp)
             )
         }
 
@@ -409,31 +476,30 @@ private fun EmptyChatSuggestions(
             fontSize = 20.sp
         )
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-            text = "Private on-device intelligence powered by local GGUF models",
+            text = "Private on-device intelligence powered by $selectedModelName",
             color = TextSecondary,
             fontSize = 13.sp,
-            modifier = Modifier.padding(horizontal = 20.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         val suggestions = listOf(
             "What is an Operating System?",
             "Open YouTube and search Telugu songs",
             "Open Android Settings",
-            "నమస్కారం! Telugu offline chat"
+            "Explain quantum computing in simple terms"
         )
 
         Column(
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
             suggestions.forEach { prompt ->
-                val shape = RoundedCornerShape(14.dp)
+                val shape = RoundedCornerShape(12.dp)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -441,7 +507,7 @@ private fun EmptyChatSuggestions(
                         .background(SurfaceCard)
                         .border(1.dp, BorderSubtle, shape)
                         .clickable { onSelectSuggestion(prompt) }
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {

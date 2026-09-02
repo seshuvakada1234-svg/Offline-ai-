@@ -263,6 +263,14 @@ Opening device Settings.`;
     // Contextual multi-turn fallback
     return `I understand: "${prompt}". Running completely offline on your device with local Qwen3 weights. Let me know if you want me to search YouTube, open an app, or explain any topic!`;
   }
+
+  public stop(): void {
+    if (this.isGenerating) {
+      this.isGenerating = false;
+      this.abortController?.abort();
+      logger.log('INFERENCE_HALT', 'Local generation cancelled by user');
+    }
+  }
 }
 
 export const qwen3Engine = new Qwen3LocalEngine();
