@@ -2,6 +2,7 @@ package com.myai.offline
 
 import com.myai.offline.data.model.InferenceMetrics
 import com.myai.offline.data.model.ModelId
+import com.myai.offline.llm.ILocalLLMEngine
 import com.myai.offline.llm.LocalLLMEngine
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -19,7 +20,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hello", "assistant" to "Hi there!")
         val userQuery = "What is an OS?"
 
-        val engine = LocalLLMEngine(context = null)
+        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
 
         val prompt = engine.formatPrompt(
             modelId = ModelId.QWEN3_1_7B,
@@ -40,7 +41,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hello")
         val userQuery = "Explain algorithms"
 
-        val engine = LocalLLMEngine(context = null)
+        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
 
         val prompt = engine.formatPrompt(
             modelId = ModelId.PHI4_MINI,
@@ -60,7 +61,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hi")
         val userQuery = "Write a function"
 
-        val engine = LocalLLMEngine(context = null)
+        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
 
         val prompt = engine.formatPrompt(
             modelId = ModelId.GEMMA3_4B,
@@ -76,7 +77,7 @@ class LocalLLMEngineTest {
 
     @Test
     fun testStreamingTokenEmissionAndMetrics() = runBlocking {
-        val engine = LocalLLMEngine(context = null)
+        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
         var calculatedMetrics: InferenceMetrics? = null
 
         val tokens = engine.generateStreaming(
@@ -96,7 +97,7 @@ class LocalLLMEngineTest {
 
     @Test
     fun testLlmCancellation() = runBlocking {
-        val engine = LocalLLMEngine(context = null)
+        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
 
         val firstTokens = engine.generateStreaming(
             prompt = "",

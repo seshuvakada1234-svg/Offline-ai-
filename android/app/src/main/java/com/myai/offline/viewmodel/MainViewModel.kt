@@ -19,6 +19,7 @@ import com.myai.offline.data.model.ModelInfo
 import com.myai.offline.data.model.ModelState
 import com.myai.offline.data.model.VoiceState
 import com.myai.offline.data.repository.ModelRepository
+import com.myai.offline.llm.ILocalLLMEngine
 import com.myai.offline.llm.LocalLLMEngine
 import com.myai.offline.voice.AudioRecorder
 import com.myai.offline.voice.TtsManager
@@ -185,10 +186,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             llmEngine.generateStreaming(
                 prompt = prompt,
                 userQuery = userQuery,
-                onMetricsCalculated = { metrics ->
+                maxTokens = 1024,
+                onMetricsCalculated = { metrics: InferenceMetrics ->
                     calculatedMetrics = metrics
                 }
-            ).collect { tokenChunk ->
+            ).collect { tokenChunk: String ->
                 stringBuffer.append(tokenChunk)
                 _streamingMessage.value = stringBuffer.toString()
             }
