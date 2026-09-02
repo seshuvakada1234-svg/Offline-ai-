@@ -1,0 +1,6 @@
+[submodule "android/app/src/main/cpp/third_party/llama.cpp"]
+	path = android/app/src/main/cpp/third_party/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "android/app/src/main/cpp/third_party/whisper.cpp"]
+	path = android/app/src/main/cpp/third_party/whisper.cpp
+	url = https://github.com/ggerganov/whisper.cpp.git
