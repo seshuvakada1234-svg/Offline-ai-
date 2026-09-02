@@ -81,6 +81,12 @@ android {
         }
     }
 
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
+
     val rootLocalProps = project.rootProject.file("local.properties")
     val hasRootNdk = rootLocalProps.exists() && rootLocalProps.readText().contains("ndk.dir")
     val hasSysNdk = System.getenv("ANDROID_NDK_HOME") != null || System.getenv("ANDROID_NDK_ROOT") != null
@@ -120,6 +126,7 @@ dependencies {
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.json)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
