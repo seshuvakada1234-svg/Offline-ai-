@@ -1236,7 +1236,7 @@ class ModelRepository(
                 if (read < 4) return false
 
                 val header = String(magic, Charsets.US_ASCII)
-                header == "ggml" || header == "ggmf" || header == "ggjt"
+                header == "lmgg" || header == "fmgg" || header == "tjgg"
             }
         } catch (_: Exception) {
             false
@@ -1376,6 +1376,6 @@ class ModelRepository(
         )
 
         private val RETRYABLE_HTTP_CODES = setOf(429, 500, 502, 503, 504)
-        private val CONTENT_RANGE_REGEX = Regex("""bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)""")
+        private val CONTENT_RANGE_REGEX = Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""")
     }
 }
