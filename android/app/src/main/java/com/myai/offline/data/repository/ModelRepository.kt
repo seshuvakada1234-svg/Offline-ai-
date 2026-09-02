@@ -417,15 +417,15 @@ class ModelRepository(
 
                 if (model.backend == "whisper.cpp") {
                     // Whisper GGML magic: "ggml" (0x67676d6c), "ggmf", "ggjt" or valid binary header
-                    val isGgml = magic[0] == 'g'.toByte() && magic[1] == 'g'.toByte()
-                    val isLmg = magic[0] == 'l'.toByte() && magic[1] == 'm'.toByte()
+                    val isGgml = magic[0] == 'g'.code.toByte() && magic[1] == 'g'.code.toByte()
+                    val isLmg = magic[0] == 'l'.code.toByte() && magic[1] == 'm'.code.toByte()
                     isGgml || isLmg || file.length() > 1024L * 1024L
                 } else {
                     // GGUF magic: "GGUF" (0x47 0x47 0x55 0x46)
-                    magic[0] == 'G'.toByte() &&
-                    magic[1] == 'G'.toByte() &&
-                    magic[2] == 'U'.toByte() &&
-                    magic[3] == 'F'.toByte()
+                    magic[0] == 'G'.code.toByte() &&
+                    magic[1] == 'G'.code.toByte() &&
+                    magic[2] == 'U'.code.toByte() &&
+                    magic[3] == 'F'.code.toByte()
                 }
             }
         } catch (e: Exception) {

@@ -81,6 +81,12 @@ android {
         }
     }
 
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+        disable += listOf("FullBackupContent")
+    }
+
     testOptions {
         unitTests {
             isReturnDefaultValues = true

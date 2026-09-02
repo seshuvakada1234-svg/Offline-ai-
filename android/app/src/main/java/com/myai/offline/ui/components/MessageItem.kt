@@ -20,13 +20,13 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -303,7 +303,7 @@ fun MessageItem(
                                     modifier = Modifier.size(24.dp)
                                 ) {
                                     Icon(
-                                        imageVector = if (isSpeakingThis) Icons.Default.Stop else Icons.Default.VolumeUp,
+                                        imageVector = if (isSpeakingThis) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
                                         contentDescription = if (isSpeakingThis) "Stop speaking" else "Speak response",
                                         tint = if (isSpeakingThis) AccentTeal else TextSecondary,
                                         modifier = Modifier.size(14.dp)

@@ -110,7 +110,7 @@ class ModelManagerTest {
         val validWhisperFile = tempFolder.newFile("ggml-base.en.bin")
         FileOutputStream(validWhisperFile).use { fos ->
             // "ggml" magic
-            fos.write(byteArrayOf('g'.toByte(), 'g'.toByte(), 'm'.toByte(), 'l'.toByte()))
+            fos.write(byteArrayOf('g'.code.toByte(), 'g'.code.toByte(), 'm'.code.toByte(), 'l'.code.toByte()))
             fos.write(ByteArray(2048))
         }
         val isValid = verifyWhisperHeader(validWhisperFile)
@@ -215,8 +215,8 @@ class ModelManagerTest {
                 val magic = ByteArray(4)
                 val read = fis.read(magic)
                 if (read < 4) return false
-                val isGgml = magic[0] == 'g'.toByte() && magic[1] == 'g'.toByte()
-                val isLmg = magic[0] == 'l'.toByte() && magic[1] == 'm'.toByte()
+                val isGgml = magic[0] == 'g'.code.toByte() && magic[1] == 'g'.code.toByte()
+                val isLmg = magic[0] == 'l'.code.toByte() && magic[1] == 'm'.code.toByte()
                 isGgml || isLmg || file.length() > 1024L * 1024L
             }
         } catch (e: Exception) {

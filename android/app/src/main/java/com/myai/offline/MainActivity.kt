@@ -38,8 +38,8 @@ class MainActivity : ComponentActivity() {
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        // Handle audio & notification permissions
+    ) { _ ->
+        // Audio & notification permissions result received
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
