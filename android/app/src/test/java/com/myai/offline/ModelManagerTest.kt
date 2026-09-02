@@ -60,17 +60,18 @@ class ModelManagerTest {
 
     @Test
     fun testDownloadUrlConstructionUsesRepositoryAndFilename() {
-        val qwen17 = ModelConstants.INITIAL_MODELS.first { it.id == ModelId.QWEN3_1_7B }
-        assertEquals(
-            "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
-            qwen17.sourceUrl
+        val expectedUrls = mapOf(
+            ModelId.QWEN3_1_7B to "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
+            ModelId.QWEN3_4B to "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
+            ModelId.PHI4_MINI to "https://huggingface.co/second-state/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf",
+            ModelId.GEMMA3_4B to "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
+            ModelId.WHISPER_BASE to "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
         )
 
-        val gemma4 = ModelConstants.INITIAL_MODELS.first { it.id == ModelId.GEMMA3_4B }
-        assertEquals(
-            "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
-            gemma4.sourceUrl
-        )
+        expectedUrls.forEach { (id, expectedUrl) ->
+            val model = ModelConstants.INITIAL_MODELS.first { it.id == id }
+            assertEquals(expectedUrl, model.sourceUrl)
+        }
     }
 
     @Test

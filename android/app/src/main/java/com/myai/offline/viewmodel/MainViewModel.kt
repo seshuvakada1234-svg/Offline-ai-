@@ -94,11 +94,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sendMutex = Mutex()
     private var messageCollectionJob: Job? = null
     private var activeGenerationJob: Job? = null
+    private var whisperAutoInitAttempted = false
 
     init {
         viewModelScope.launch {
             modelRepository.selectedModelId.collect { selected ->
                 _selectedModelId.value = selected
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.models.collect { modelList ->
+                val whisperModel = modelList.firstOrNull { it.id == ModelId.WHISPER_BASE } ?: return@collect
+                val shouldAutoInit = whisperModel.state in setOf(ModelState.READY, ModelState.ACTIVE)
+                if (!shouldAutoInit) {
+                    whisperAutoInitAttempted = false
+                    return@collect
+                }
+
+                if (whisperEngine.isModelLoaded) {
+                    whisperAutoInitAttempted = true
+                    return@collect
+                }
+
+                if (!whisperAutoInitAttempted) {
+                    whisperAutoInitAttempted = true
+                    val loaded = whisperEngine.loadModel(whisperModel)
+                    if (loaded) {
+                        Log.i(TAG, "[WHISPER_AUTO_INIT] Whisper initialized automatically")
+                    } else {
+                        Log.w(TAG, "[WHISPER_AUTO_INIT] Whisper model present but initialization failed")
+                    }
+                }
             }
         }
 
