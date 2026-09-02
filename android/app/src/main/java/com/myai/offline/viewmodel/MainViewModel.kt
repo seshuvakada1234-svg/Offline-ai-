@@ -142,12 +142,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectModel(id: ModelId) {
-        _selectedModelId.value = id
-        viewModelScope.launch {
-            val model = modelRepository.getModel(id)
-            if (model != null && model.state == ModelState.READY) {
-                llmEngine.loadModel(model)
+        val success = modelRepository.selectModel(id)
+        if (success) {
+            _selectedModelId.value = id
+            viewModelScope.launch {
+                val model = modelRepository.getModel(id)
+                if (model != null && model.state == ModelState.READY) {
+                    try {
+                        llmEngine.loadModel(model)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to load model $id: ${e.message}")
+                    }
+                }
             }
+        } else {
+            Log.w(TAG, "Model $id is not ready or not installed. Download required.")
         }
     }
 
