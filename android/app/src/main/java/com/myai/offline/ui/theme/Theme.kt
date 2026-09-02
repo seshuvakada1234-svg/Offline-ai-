@@ -32,10 +32,13 @@ fun MyAITheme(
 
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
-            window.statusBarColor = BgDark.toArgb()
-            window.navigationBarColor = BgDark.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+            val activity = view.context as? Activity
+            if (activity != null) {
+                val window = activity.window
+                window.statusBarColor = BgDark.toArgb()
+                window.navigationBarColor = BgDark.toArgb()
+                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+            }
         }
     }
 

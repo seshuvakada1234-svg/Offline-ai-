@@ -96,10 +96,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             modelRepository.checkLocalModelFiles()
             val initial = modelRepository.getModel(ModelId.QWEN3_1_7B)
-            if (initial != null) {
-                llmEngine.loadModel(initial)
+            if (initial != null && initial.state == ModelState.READY) {
+                try {
+                    llmEngine.loadModel(initial)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Default LLM model not loaded yet: ${e.message}")
+                }
             }
-            whisperEngine.loadModel(modelRepository.getModel(ModelId.WHISPER_BASE) ?: initial!!)
+            val whisperModel = modelRepository.getModel(ModelId.WHISPER_BASE)
+            if (whisperModel != null && whisperModel.state == ModelState.READY) {
+                try {
+                    whisperEngine.loadModel(whisperModel)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Whisper model not loaded yet: ${e.message}")
+                }
+            }
 
             createNewConversation()
             updateDeviceMetrics()

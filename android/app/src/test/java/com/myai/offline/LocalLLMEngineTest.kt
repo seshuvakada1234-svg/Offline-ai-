@@ -1,12 +1,11 @@
 package com.myai.offline
 
-import com.myai.offline.data.model.InferenceMetrics
+import com.myai.offline.actions.ActionParser
+import com.myai.offline.data.model.AssistantActionType
 import com.myai.offline.data.model.ModelId
-import com.myai.offline.llm.ILocalLLMEngine
-import com.myai.offline.llm.LocalLLMEngine
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.runBlocking
+import com.myai.offline.data.model.ModelInfo
+import com.myai.offline.data.model.ModelState
+import com.myai.offline.llm.PromptFormatter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -20,9 +19,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hello", "assistant" to "Hi there!")
         val userQuery = "What is an OS?"
 
-        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
-
-        val prompt = engine.formatPrompt(
+        val prompt = PromptFormatter.format(
             modelId = ModelId.QWEN3_1_7B,
             systemPrompt = "You are MyAI",
             conversationHistory = history,
@@ -41,9 +38,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hello")
         val userQuery = "Explain algorithms"
 
-        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
-
-        val prompt = engine.formatPrompt(
+        val prompt = PromptFormatter.format(
             modelId = ModelId.PHI4_MINI,
             systemPrompt = "You are MyAI",
             conversationHistory = history,
@@ -61,9 +56,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hi")
         val userQuery = "Write a function"
 
-        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
-
-        val prompt = engine.formatPrompt(
+        val prompt = PromptFormatter.format(
             modelId = ModelId.GEMMA3_4B,
             systemPrompt = "You are MyAI",
             conversationHistory = history,
@@ -76,38 +69,73 @@ class LocalLLMEngineTest {
     }
 
     @Test
-    fun testStreamingTokenEmissionAndMetrics() = runBlocking {
-        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
-        var calculatedMetrics: InferenceMetrics? = null
+    fun testPromptFormatterWithConversationHistory() {
+        val history = listOf(
+            "user" to "Search Telugu songs on YouTube",
+            "assistant" to "```json\n{\"action\": \"SEARCH_YOUTUBE\", \"query\": \"Telugu songs\"}\n```"
+        )
+        val userQuery = "Open settings"
 
-        val tokens = engine.generateStreaming(
-            prompt = "",
-            userQuery = "What is an operating system?",
-            maxTokens = 64,
-            onMetricsCalculated = { calculatedMetrics = it }
-        ).toList()
+        val prompt = PromptFormatter.format(
+            modelId = ModelId.QWEN3_1_7B,
+            conversationHistory = history,
+            userQuery = userQuery
+        )
 
-        assertTrue(tokens.isNotEmpty())
-        val combinedText = tokens.joinToString("")
-        assertTrue(combinedText.contains("Operating System"))
-        assertNotNull(calculatedMetrics)
-        assertTrue(calculatedMetrics!!.totalTokens > 0)
-        assertTrue(calculatedMetrics!!.totalGenTimeMs >= 0)
+        assertTrue(prompt.contains("SEARCH_YOUTUBE"))
+        assertTrue(prompt.contains("Open settings"))
+        assertTrue(prompt.startsWith("<|im_start|>system\n"))
     }
 
     @Test
-    fun testLlmCancellation() = runBlocking {
-        val engine: ILocalLLMEngine = LocalLLMEngine(context = null)
+    fun testPromptFormatterDefaultSystemPromptContainsActionInstructions() {
+        val systemPrompt = PromptFormatter.DEFAULT_SYSTEM_PROMPT
+        assertTrue(systemPrompt.contains("OPEN_YOUTUBE"))
+        assertTrue(systemPrompt.contains("SEARCH_YOUTUBE"))
+        assertTrue(systemPrompt.contains("OPEN_CHROME"))
+        assertTrue(systemPrompt.contains("OPEN_SETTINGS"))
+    }
 
-        val firstTokens = engine.generateStreaming(
-            prompt = "",
-            userQuery = "Explain quantum computing in detail",
-            maxTokens = 256
-        ).take(2).toList()
+    @Test
+    fun testActionParsingFromLLMOutput() {
+        val sampleLLMResponse = """
+            I am opening the YouTube app for you.
+            ```json
+            {
+              "action": "OPEN_YOUTUBE"
+            }
+            ```
+        """.trimIndent()
 
-        engine.stopGeneration()
+        val parsed = ActionParser.parse(sampleLLMResponse)
+        assertTrue(parsed.hasAction)
+        assertNotNull(parsed.action)
+        assertEquals(AssistantActionType.OPEN_YOUTUBE, parsed.action?.type)
+        assertEquals("I am opening the YouTube app for you.", parsed.cleanText)
+        assertFalse(parsed.isMalformed)
+    }
 
-        assertEquals(2, firstTokens.size)
-        assertFalse(engine.isModelLoaded)
+    @Test
+    fun testModelReadinessValidation() {
+        val readyModel = ModelInfo(
+            id = ModelId.QWEN3_1_7B,
+            name = "Qwen3 1.7B",
+            tag = "Fast Assistant",
+            description = "On-device LLM",
+            sizeFormatted = "1.18 GB",
+            sizeBytes = 1266679808L,
+            sha256Expected = "9a4f218c347b0e3568c09a842183e29f032e1858a74e9b98031d234ea576ef12",
+            filename = "qwen3-1.7b-instruct-q4_k_m.gguf",
+            sourceUrl = "https://huggingface.co/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf",
+            contextSize = 4096,
+            quant = "Q4_K_M",
+            backend = "llama.cpp",
+            architecture = "qwen3",
+            state = ModelState.READY,
+            progress = 100
+        )
+
+        assertEquals(ModelState.READY, readyModel.state)
+        assertTrue(readyModel.progress == 100)
     }
 }

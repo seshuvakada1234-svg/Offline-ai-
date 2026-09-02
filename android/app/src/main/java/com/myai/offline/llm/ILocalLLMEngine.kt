@@ -14,8 +14,8 @@ interface ILocalLLMEngine {
     fun stopGeneration()
     fun formatPrompt(
         modelId: ModelId,
-        systemPrompt: String = LocalLLMEngine.DEFAULT_SYSTEM_PROMPT,
-        conversationHistory: List<Pair<String, String>>,
+        systemPrompt: String = PromptFormatter.DEFAULT_SYSTEM_PROMPT,
+        conversationHistory: List<Pair<String, String>> = emptyList(),
         userQuery: String
     ): String
     fun generateStreaming(

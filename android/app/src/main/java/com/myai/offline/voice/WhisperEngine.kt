@@ -13,19 +13,20 @@ class WhisperEngine(private val context: Context) {
     private var isLoaded: Boolean = false
 
     val isModelLoaded: Boolean
-        get() = isLoaded
+        get() = isLoaded && activeModelHandle != 0L
 
     suspend fun loadModel(modelInfo: ModelInfo): Boolean = withContext(Dispatchers.IO) {
         val modelFile = File(context.filesDir, "models/${modelInfo.filename}")
         Log.i(TAG, "Loading Whisper model from: ${modelFile.absolutePath}")
 
-        if (NativeWhisperBridge.isAvailable() && modelFile.exists()) {
+        if (NativeWhisperBridge.isAvailable() && modelFile.exists() && modelFile.length() > 0) {
             activeModelHandle = NativeWhisperBridge.nativeLoadModel(modelFile.absolutePath)
+            isLoaded = (activeModelHandle != 0L)
         } else {
-            activeModelHandle = 0xDEADBEEF
+            activeModelHandle = 0L
+            isLoaded = false
         }
-        isLoaded = true
-        true
+        isLoaded
     }
 
     suspend fun unloadModel() = withContext(Dispatchers.IO) {
@@ -56,8 +57,6 @@ class WhisperEngine(private val context: Context) {
             }
         }
 
-        // When running in test/demo mode on device with speech input:
-        // Returns the voice transcription
-        "Open YouTube and search Telugu songs"
+        ""
     }
 }

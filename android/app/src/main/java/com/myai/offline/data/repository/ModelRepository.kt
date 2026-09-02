@@ -161,7 +161,7 @@ class ModelRepository(
 
                 val targetFile = getModelFile(currentModel.filename)
                 val tempFile = File(context.filesDir, "models/${currentModel.filename}.tmp")
-                if (!tempFile.parentFile.exists()) tempFile.parentFile.mkdirs()
+                tempFile.parentFile?.mkdirs()
 
                 var currentBytes = currentModel.downloadedBytes
                 val totalBytes = currentModel.sizeBytes

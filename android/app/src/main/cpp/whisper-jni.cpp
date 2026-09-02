@@ -2,14 +2,19 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <sys/stat.h>
 #include <android/log.h>
 
 #define TAG "MyAI-WhisperJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-static std::atomic<bool> g_is_whisper_loaded{false};
-static std::string g_whisper_model_path;
+struct WhisperModelContext {
+    std::string model_path;
+    bool is_valid;
+};
+
+static std::atomic<WhisperModelContext*> g_active_whisper{nullptr};
 
 extern "C" {
 
@@ -26,14 +31,32 @@ Java_com_myai_offline_voice_NativeWhisperBridge_nativeLoadModel(
     JNIEnv *env,
     jobject /* this */,
     jstring model_path_jstr) {
+    if (!model_path_jstr) {
+        LOGE("nativeLoadModel: null path");
+        return 0L;
+    }
+
     const char *model_path = env->GetStringUTFChars(model_path_jstr, nullptr);
     LOGI("Loading whisper model from: %s", model_path);
 
-    g_whisper_model_path = model_path;
-    g_is_whisper_loaded.store(true);
+    struct stat st;
+    if (stat(model_path, &st) != 0 || st.st_size <= 0) {
+        LOGE("Whisper model file not found or empty: %s", model_path);
+        env->ReleaseStringUTFChars(model_path_jstr, model_path);
+        return 0L;
+    }
+
+    auto *ctx = new WhisperModelContext();
+    ctx->model_path = std::string(model_path);
+    ctx->is_valid = true;
+
+    WhisperModelContext* old = g_active_whisper.exchange(ctx);
+    if (old) {
+        delete old;
+    }
 
     env->ReleaseStringUTFChars(model_path_jstr, model_path);
-    return 0xDEADBEEF;
+    return reinterpret_cast<jlong>(ctx);
 }
 
 JNIEXPORT void JNICALL
@@ -41,16 +64,22 @@ Java_com_myai_offline_voice_NativeWhisperBridge_nativeUnloadModel(
     JNIEnv *env,
     jobject /* this */,
     jlong model_handle) {
-    LOGI("Unloading whisper model handle: %ld", (long)model_handle);
-    g_is_whisper_loaded.store(false);
-    g_whisper_model_path.clear();
+    LOGI("Unloading whisper model handle: %lld", (long long)model_handle);
+    WhisperModelContext* ctx = reinterpret_cast<WhisperModelContext*>(model_handle);
+    if (ctx && ctx == g_active_whisper.load()) {
+        g_active_whisper.store(nullptr);
+        delete ctx;
+    } else if (ctx) {
+        delete ctx;
+    }
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_myai_offline_voice_NativeWhisperBridge_nativeIsModelLoaded(
     JNIEnv *env,
     jobject /* this */) {
-    return g_is_whisper_loaded.load() ? JNI_TRUE : JNI_FALSE;
+    WhisperModelContext* ctx = g_active_whisper.load();
+    return (ctx != nullptr && ctx->is_valid) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL
@@ -60,12 +89,21 @@ Java_com_myai_offline_voice_NativeWhisperBridge_nativeTranscribe(
     jlong model_handle,
     jfloatArray pcm_data_jarr,
     jstring lang_jstr) {
-    
-    const char *lang = env->GetStringUTFChars(lang_jstr, nullptr);
-    jsize len = env->GetArrayLength(pcm_data_jarr);
+
+    WhisperModelContext* ctx = reinterpret_cast<WhisperModelContext*>(model_handle);
+    if (!ctx || !ctx->is_valid) {
+        LOGE("nativeTranscribe: invalid whisper handle");
+        return env->NewStringUTF("");
+    }
+
+    const char *lang = lang_jstr ? env->GetStringUTFChars(lang_jstr, nullptr) : "auto";
+    jsize len = pcm_data_jarr ? env->GetArrayLength(pcm_data_jarr) : 0;
     LOGI("Whisper transcription requested for %d samples, language: %s", len, lang);
 
-    env->ReleaseStringUTFChars(lang_jstr, lang);
+    if (lang_jstr) {
+        env->ReleaseStringUTFChars(lang_jstr, lang);
+    }
+
     return env->NewStringUTF("");
 }
 

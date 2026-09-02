@@ -24,7 +24,12 @@ android {
             abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64"))
         }
 
-        if (project.hasProperty("includeNative") || project.rootProject.file("local.properties").readText().contains("ndk.dir")) {
+        val localProps = project.rootProject.file("local.properties")
+        val hasLocalNdk = localProps.exists() && localProps.readText().contains("ndk.dir")
+        val hasEnvNdk = System.getenv("ANDROID_NDK_HOME") != null || System.getenv("ANDROID_NDK_ROOT") != null
+        val includeNative = project.hasProperty("includeNative") || hasLocalNdk || hasEnvNdk || project.file("src/main/cpp/CMakeLists.txt").exists()
+
+        if (includeNative) {
             externalNativeBuild {
                 cmake {
                     cppFlags.addAll(listOf("-std=c++17", "-O3", "-fexceptions", "-frtti"))
@@ -76,7 +81,12 @@ android {
         }
     }
 
-    if (project.hasProperty("includeNative") || project.rootProject.file("local.properties").readText().contains("ndk.dir")) {
+    val rootLocalProps = project.rootProject.file("local.properties")
+    val hasRootNdk = rootLocalProps.exists() && rootLocalProps.readText().contains("ndk.dir")
+    val hasSysNdk = System.getenv("ANDROID_NDK_HOME") != null || System.getenv("ANDROID_NDK_ROOT") != null
+    val enableNativeBuild = project.hasProperty("includeNative") || hasRootNdk || hasSysNdk || project.file("src/main/cpp/CMakeLists.txt").exists()
+
+    if (enableNativeBuild) {
         externalNativeBuild {
             cmake {
                 path = file("src/main/cpp/CMakeLists.txt")

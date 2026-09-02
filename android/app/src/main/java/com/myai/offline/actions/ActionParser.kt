@@ -44,7 +44,7 @@ object ActionParser {
 
         return try {
             val json = JSONObject(rawJson)
-            val actionStr = json.optString("action", null)
+            val actionStr = if (json.has("action")) json.optString("action") else ""
             val type = AssistantActionType.fromString(actionStr)
 
             if (type == null) {
