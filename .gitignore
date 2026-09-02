@@ -6,3 +6,25 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local Android SDK
+.android-sdk/
+
+# Gradle
+.gradle/
+**/.gradle/
+
+# Android build output
+**/build/
+
+# Native/CMake generated files
+**/.cxx/
+
+# IDE/local files
+.idea/
+*.iml
+local.properties
+
+# Generated APK/AAB
+*.apk
+*.aab

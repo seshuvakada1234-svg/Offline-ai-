@@ -146,7 +146,7 @@ fun VoiceOverlay(
             val statusText = when (voiceState) {
                 VoiceState.LISTENING -> "🎤 Listening..."
                 VoiceState.TRANSCRIBING -> "Transcribing speech (Whisper)..."
-                VoiceState.THINKING -> "Thinking with Qwen3..."
+                VoiceState.THINKING -> "Thinking with local model..."
                 VoiceState.SPEAKING -> "Speaking response..."
                 VoiceState.ACTION_EXECUTING -> "Executing Android Action..."
                 VoiceState.ERROR -> "Voice processing error"

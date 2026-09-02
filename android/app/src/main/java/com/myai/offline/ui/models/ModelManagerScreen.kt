@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -70,7 +72,12 @@ fun ModelManagerScreen(
     selectedModelId: ModelId,
     onSelectModel: (ModelId) -> Unit,
     onDownloadModel: (ModelId) -> Unit,
+    onPauseDownload: (ModelId) -> Unit,
+    onResumeDownload: (ModelId) -> Unit,
+    onCancelDownload: (ModelId) -> Unit,
+    onRetryDownload: (ModelId) -> Unit,
     onDeleteModel: (ModelId) -> Unit,
+    onRefreshModels: () -> Unit,
     onBack: () -> Unit
 ) {
     Scaffold(
@@ -80,7 +87,12 @@ fun ModelManagerScreen(
                 title = {
                     Column {
                         Text("GGUF Model Hub", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text("On-Device AI Engine & Weights", color = TextSecondary, fontSize = 12.sp)
+                        Text("Real Offline Model Downloads", color = TextSecondary, fontSize = 12.sp)
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onRefreshModels) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = TextPrimary)
                     }
                 },
                 navigationIcon = {
@@ -124,20 +136,23 @@ fun ModelManagerScreen(
             items(models) { model ->
                 val isSelected = model.id == selectedModelId
                 val isReady = model.state == ModelState.READY
+                val isActive = model.state == ModelState.ACTIVE
                 val isDownloading = model.state == ModelState.DOWNLOADING
                 val isVerifying = model.state == ModelState.VERIFYING
-                val isChecking = model.state == ModelState.CHECKING_STORAGE
+                val isPaused = model.state == ModelState.PAUSED
+                val isLoading = model.state == ModelState.LOADING
                 val isError = model.state == ModelState.ERROR
+                val isInstalled = isReady || isActive || isLoading
                 val shape = RoundedCornerShape(16.dp)
 
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(shape)
-                        .background(if (isSelected && isReady) PrimaryIndigo.copy(alpha = 0.08f) else SurfaceCard)
+                        .background(if (isSelected && isInstalled) PrimaryIndigo.copy(alpha = 0.08f) else SurfaceCard)
                         .border(
                             1.dp,
-                            if (isSelected && isReady) PrimaryIndigo else BorderSubtle,
+                            if (isSelected && isInstalled) PrimaryIndigo else BorderSubtle,
                             shape
                         )
                         .padding(16.dp)
@@ -152,13 +167,13 @@ fun ModelManagerScreen(
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(CircleShape)
-                                    .background(if (isSelected && isReady) PrimaryIndigo.copy(alpha = 0.2f) else SurfaceDark),
+                                    .background(if (isSelected && isInstalled) PrimaryIndigo.copy(alpha = 0.2f) else SurfaceDark),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = if (model.isDefault) Icons.Default.ElectricBolt else Icons.Default.Memory,
                                     contentDescription = null,
-                                    tint = if (isSelected && isReady) PrimaryIndigo else TextSecondary,
+                                    tint = if (isSelected && isInstalled) PrimaryIndigo else TextSecondary,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -207,6 +222,32 @@ fun ModelManagerScreen(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = when (model.state) {
+                            ModelState.NOT_INSTALLED -> "Not installed"
+                            ModelState.DOWNLOADING -> "Downloading"
+                            ModelState.PAUSED -> "Paused"
+                            ModelState.VERIFYING -> "Verifying"
+                            ModelState.READY -> if (model.isWhisper) "Whisper ready for voice" else "Installed"
+                            ModelState.LOADING -> "Loading into llama.cpp"
+                            ModelState.ACTIVE -> if (model.isWhisper) "Whisper ready for voice" else "Active model"
+                            ModelState.ERROR -> "Error"
+                        },
+                        color = when (model.state) {
+                            ModelState.ERROR -> AccentRose
+                            ModelState.ACTIVE -> AccentTeal
+                            ModelState.READY -> AccentTeal
+                            ModelState.VERIFYING -> AccentTeal
+                            ModelState.DOWNLOADING, ModelState.PAUSED -> AccentAmber
+                            ModelState.LOADING -> PrimaryIndigo
+                            else -> TextMuted
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
@@ -217,7 +258,7 @@ fun ModelManagerScreen(
                     )
 
                     // Download Progress Bar & Speed if downloading
-                    if (isDownloading) {
+                    if (isDownloading || isPaused) {
                         Spacer(modifier = Modifier.height(12.dp))
                         val downloadedMb = model.downloadedBytes / (1024.0 * 1024.0)
                         val totalMb = model.sizeBytes / (1024.0 * 1024.0)
@@ -237,7 +278,12 @@ fun ModelManagerScreen(
                                     fontSize = 11.sp,
                                     color = AccentAmber
                                 )
-                                Text("${(model.downloadProgress * 100).toInt()}%", fontSize = 11.sp, color = AccentAmber, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "${(model.downloadProgress * 100).toInt()}%",
+                                    fontSize = 11.sp,
+                                    color = AccentAmber,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             LinearProgressIndicator(
@@ -249,6 +295,10 @@ fun ModelManagerScreen(
                                 color = AccentAmber,
                                 trackColor = SurfaceDark
                             )
+                            if (isPaused) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("Paused", fontSize = 11.sp, color = AccentAmber)
+                            }
                         }
                     } else if (isVerifying) {
                         Spacer(modifier = Modifier.height(10.dp))
@@ -257,9 +307,13 @@ fun ModelManagerScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Verifying GGUF header & checksum...", fontSize = 11.sp, color = AccentTeal)
                         }
-                    } else if (isChecking) {
+                    } else if (isLoading) {
                         Spacer(modifier = Modifier.height(10.dp))
-                        Text("Checking storage space...", fontSize = 11.sp, color = AccentAmber)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), color = PrimaryIndigo, strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Loading model into llama.cpp...", fontSize = 11.sp, color = PrimaryIndigo)
+                        }
                     } else if (isError && model.errorMessage != null) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -278,7 +332,49 @@ fun ModelManagerScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         when {
-                            isDownloading || isVerifying || isChecking -> {
+                            isDownloading -> {
+                                OutlinedButton(
+                                    onClick = { onPauseDownload(model.id) },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentAmber),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(36.dp)
+                                ) {
+                                    Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Pause", fontSize = 12.sp)
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                OutlinedButton(
+                                    onClick = { onCancelDownload(model.id) },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRose),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(36.dp)
+                                ) {
+                                    Text("Cancel", fontSize = 12.sp)
+                                }
+                            }
+                            isPaused -> {
+                                Button(
+                                    onClick = { onResumeDownload(model.id) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(36.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Resume", fontSize = 12.sp, color = Color.White)
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                OutlinedButton(
+                                    onClick = { onCancelDownload(model.id) },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRose),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(36.dp)
+                                ) {
+                                    Text("Cancel", fontSize = 12.sp)
+                                }
+                            }
+                            isVerifying || isLoading -> {
                                 Button(
                                     onClick = {},
                                     enabled = false,
@@ -288,10 +384,10 @@ fun ModelManagerScreen(
                                 ) {
                                     CircularProgressIndicator(modifier = Modifier.size(16.dp), color = AccentAmber, strokeWidth = 2.dp)
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text(if (isVerifying) "Verifying" else "Downloading", fontSize = 12.sp, color = TextMuted)
+                                    Text(if (isVerifying) "Verifying" else "Loading", fontSize = 12.sp, color = TextMuted)
                                 }
                             }
-                            isReady -> {
+                            isInstalled -> {
                                 OutlinedButton(
                                     onClick = { onDeleteModel(model.id) },
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRose),
@@ -304,9 +400,20 @@ fun ModelManagerScreen(
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
 
-                                if (isSelected) {
+                                if (!model.isChatModel) {
                                     Button(
                                         onClick = {},
+                                        enabled = false,
+                                        colors = ButtonDefaults.buttonColors(disabledContainerColor = AccentTeal.copy(alpha = 0.5f)),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.height(36.dp)
+                                    ) {
+                                        Text("Ready for voice", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                    }
+                                } else if (isActive) {
+                                    Button(
+                                        onClick = {},
+                                        enabled = false,
                                         colors = ButtonDefaults.buttonColors(containerColor = AccentTeal),
                                         shape = RoundedCornerShape(10.dp),
                                         modifier = Modifier.height(36.dp)
@@ -322,32 +429,57 @@ fun ModelManagerScreen(
                                         shape = RoundedCornerShape(10.dp),
                                         modifier = Modifier.height(36.dp)
                                     ) {
-                                        Text("Set as Active", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                        Text("Load & Activate", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
                                     }
                                 }
                             }
                             isError -> {
-                                Button(
-                                    onClick = { onDownloadModel(model.id) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = AccentRose),
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.height(36.dp)
-                                ) {
-                                    Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Retry Download", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                if (model.isDownloadable) {
+                                    Button(
+                                        onClick = { onRetryDownload(model.id) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = AccentRose),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.height(36.dp)
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Retry Download", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                    }
+                                } else {
+                                    OutlinedButton(
+                                        onClick = { onDeleteModel(model.id) },
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRose),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.height(36.dp)
+                                    ) {
+                                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Delete", fontSize = 12.sp)
+                                    }
                                 }
                             }
                             else -> {
-                                Button(
-                                    onClick = { onDownloadModel(model.id) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo),
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.height(36.dp)
-                                ) {
-                                    Icon(Icons.Default.Download, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Download (${model.sizeFormatted})", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                if (model.isDownloadable) {
+                                    Button(
+                                        onClick = { onDownloadModel(model.id) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.height(36.dp)
+                                    ) {
+                                        Icon(Icons.Default.Download, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Download (${model.sizeFormatted})", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = {},
+                                        enabled = false,
+                                        colors = ButtonDefaults.buttonColors(disabledContainerColor = SurfaceDark),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.height(36.dp)
+                                    ) {
+                                        Text("Sideload required", fontSize = 12.sp, color = TextMuted)
+                                    }
                                 }
                             }
                         }

@@ -3,7 +3,6 @@ package com.myai.offline.viewmodel
 import android.app.Application
 import android.content.Context
 import android.os.BatteryManager
-import android.os.Process
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -32,6 +31,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.UUID
@@ -49,7 +50,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val actionHandler = AndroidActionHandler(application)
     private val ttsManager = TtsManager(application)
 
-    // UI States
     val conversations = conversationDao.getAllConversations()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -61,8 +61,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val models: StateFlow<List<ModelInfo>> = modelRepository.models
 
-    private val _selectedModelId = MutableStateFlow<ModelId>(ModelId.QWEN3_1_7B)
+    private val _selectedModelId = MutableStateFlow(ModelId.QWEN3_1_7B)
     val selectedModelId: StateFlow<ModelId> = _selectedModelId.asStateFlow()
+
+    private val _composerText = MutableStateFlow("")
+    val composerText: StateFlow<String> = _composerText.asStateFlow()
 
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
@@ -82,42 +85,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _currentlySpeakingMessageId = MutableStateFlow<String?>(null)
     val currentlySpeakingMessageId: StateFlow<String?> = _currentlySpeakingMessageId.asStateFlow()
 
-    // Hardware Telemetry
     private val _deviceRamUsageMb = MutableStateFlow(0L)
     val deviceRamUsageMb: StateFlow<Long> = _deviceRamUsageMb.asStateFlow()
 
     private val _batteryLevel = MutableStateFlow(100)
     val batteryLevel: StateFlow<Int> = _batteryLevel.asStateFlow()
 
+    private val sendMutex = Mutex()
+    private var messageCollectionJob: Job? = null
     private var activeGenerationJob: Job? = null
 
     init {
-        // Initialize default session if none exists
         viewModelScope.launch {
-            modelRepository.checkLocalModelFiles()
-            val initial = modelRepository.getModel(ModelId.QWEN3_1_7B)
-            if (initial != null && initial.state == ModelState.READY) {
-                try {
-                    llmEngine.loadModel(initial)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Default LLM model not loaded yet: ${e.message}")
-                }
+            modelRepository.selectedModelId.collect { selected ->
+                _selectedModelId.value = selected
             }
-            val whisperModel = modelRepository.getModel(ModelId.WHISPER_BASE)
-            if (whisperModel != null && whisperModel.state == ModelState.READY) {
-                try {
-                    whisperEngine.loadModel(whisperModel)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Whisper model not loaded yet: ${e.message}")
-                }
-            }
+        }
 
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.checkLocalModelFiles()
+            activateStartupDefaultModel()
             createNewConversation()
             updateDeviceMetrics()
         }
     }
 
-    private var messageCollectionJob: Job? = null
+    private suspend fun activateStartupDefaultModel() {
+        val preferredIds = buildList {
+            add(ModelId.QWEN3_1_7B)
+            add(modelRepository.selectedModelId.value)
+            addAll(
+                modelRepository.models.value
+                    .filter { it.isChatModel && it.state == ModelState.READY }
+                    .map { it.id }
+            )
+        }.distinct()
+
+        for (id in preferredIds) {
+            if (activateModelInternal(id, persistSelection = true)) {
+                return
+            }
+        }
+    }
+
+    fun updateComposerText(text: String) {
+        _composerText.value = text
+    }
 
     fun createNewConversation() {
         val newId = UUID.randomUUID().toString()
@@ -125,12 +138,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = emptyList()
 
         viewModelScope.launch(Dispatchers.IO) {
-            val conv = ConversationEntity(
+            val conversation = ConversationEntity(
                 id = newId,
                 title = "New Chat",
                 selectedModelId = _selectedModelId.value.rawValue
             )
-            conversationDao.insertConversation(conv)
+            conversationDao.insertConversation(conversation)
         }
         observeConversation(newId)
     }
@@ -143,126 +156,150 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun observeConversation(id: String) {
         messageCollectionJob?.cancel()
         messageCollectionJob = viewModelScope.launch {
-            messageDao.getMessagesForConversation(id).collect { list: List<MessageEntity> ->
+            messageDao.getMessagesForConversation(id).collect { list ->
                 _messages.value = list
             }
         }
     }
 
     fun selectModel(id: ModelId) {
-        val success = modelRepository.selectModel(id)
-        if (success) {
-            _selectedModelId.value = id
-            viewModelScope.launch {
-                val model = modelRepository.getModel(id)
-                if (model != null && model.state == ModelState.READY) {
-                    try {
-                        llmEngine.loadModel(model)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to load model $id: ${e.message}")
-                    }
-                }
+        viewModelScope.launch(Dispatchers.IO) {
+            val activated = activateModelInternal(id, persistSelection = true)
+            if (!activated) {
+                val modelName = modelRepository.getModel(id)?.name ?: id.rawValue
+                Log.e(TAG, "[MODEL_LOAD_FAILED] Unable to activate model $modelName")
             }
-        } else {
-            Log.w(TAG, "Model $id is not ready or not installed. Download required.")
+        }
+    }
+
+    private suspend fun activateModelInternal(id: ModelId, persistSelection: Boolean): Boolean {
+        val model = modelRepository.getModel(id) ?: return false
+        if (!model.isChatModel) return false
+
+        if (model.state !in setOf(ModelState.READY, ModelState.ACTIVE, ModelState.ERROR)) {
+            Log.w(TAG, "Model ${model.name} is not loadable. state=${model.state}")
+            return false
+        }
+
+        if (persistSelection && !modelRepository.selectModel(id)) {
+            return false
+        }
+
+        _selectedModelId.value = id
+        modelRepository.markModelLoading(id)
+
+        return try {
+            llmEngine.loadModel(
+                model = model,
+                threads = recommendedThreadCount(),
+                ctxSize = minOf(DEFAULT_RUNTIME_CONTEXT, model.contextSize)
+            )
+            modelRepository.markModelActive(id)
+            Log.i(TAG, "[MODEL_LOAD_SUCCESS] Activated model ${model.name}")
+            true
+        } catch (e: Exception) {
+            val message = e.localizedMessage ?: "Unable to load model"
+            modelRepository.markModelLoadFailed(id, message)
+            Log.e(TAG, "[MODEL_LOAD_FAILED] ${model.name}: $message", e)
+            false
         }
     }
 
     fun sendMessage(userText: String, isVoice: Boolean = false) {
-        val convId = _currentConversationId.value ?: return
+        val conversationId = _currentConversationId.value ?: return
         val trimmed = userText.trim()
         if (trimmed.isEmpty()) return
 
-        val userMessageId = UUID.randomUUID().toString()
-        val userMessage = MessageEntity(
-            id = userMessageId,
-            conversationId = convId,
-            role = "user",
-            content = trimmed,
-            isVoiceInput = isVoice
-        )
-
         viewModelScope.launch(Dispatchers.IO) {
-            messageDao.insertMessage(userMessage)
+            sendMutex.withLock {
+                val existing = messageDao.getMessagesList(conversationId)
+                val last = existing.lastOrNull()
+                if (last != null &&
+                    last.role == "user" &&
+                    last.content == trimmed &&
+                    (System.currentTimeMillis() - last.timestamp) < DUPLICATE_WINDOW_MS
+                ) {
+                    Log.w(TAG, "Skipped duplicate user submission within debounce window")
+                    return@withLock
+                }
 
-            // Update conversation title if first message
-            if (_messages.value.isEmpty()) {
-                val title = if (trimmed.length > 30) trimmed.take(27) + "..." else trimmed
-                conversationDao.updateConversationTitle(convId, title)
+                val userMessage = MessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = conversationId,
+                    role = "user",
+                    content = trimmed,
+                    isVoiceInput = isVoice
+                )
+
+                messageDao.insertMessage(userMessage)
+
+                if (existing.isEmpty()) {
+                    val title = if (trimmed.length > 30) trimmed.take(27) + "..." else trimmed
+                    conversationDao.updateConversationTitle(conversationId, title)
+                }
             }
 
-            // Trigger Assistant LLM Stream
-            generateAssistantResponse(convId, trimmed)
+            withContext(Dispatchers.Main) {
+                _composerText.value = ""
+            }
+            generateAssistantResponse(conversationId, trimmed)
         }
     }
 
-    private fun generateAssistantResponse(convId: String, userQuery: String) {
+    private fun generateAssistantResponse(conversationId: String, userQuery: String) {
         _isGenerating.value = true
         _streamingMessage.value = ""
 
         activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Ensure model is ready
                 val selectedModel = modelRepository.getModel(_selectedModelId.value)
-                if (selectedModel == null || selectedModel.state != ModelState.READY) {
-                    val errorText = "Unable to generate a response.\n\nModel ${selectedModel?.name ?: "selected"} is not installed. Please download it from the Model Manager."
-                    val errorMsgEntity = MessageEntity(
-                        id = UUID.randomUUID().toString(),
-                        conversationId = convId,
-                        role = "assistant",
-                        content = errorText
+                if (selectedModel == null || selectedModel.state == ModelState.NOT_INSTALLED) {
+                    insertAssistantMessage(
+                        conversationId,
+                        "Download ${selectedModel?.name ?: "a model"} to chat."
                     )
-                    messageDao.insertMessage(errorMsgEntity)
-                    _isGenerating.value = false
-                    _streamingMessage.value = ""
                     return@launch
                 }
 
-                if (!llmEngine.isModelLoaded || llmEngine.currentLoadedModel?.id != _selectedModelId.value) {
-                    try {
-                        llmEngine.loadModel(selectedModel)
-                    } catch (e: Exception) {
-                        val errorText = "Failed to load ${selectedModel.name}: ${e.localizedMessage ?: "File error"}.\nPlease verify the model file in Model Manager."
-                        val errorMsgEntity = MessageEntity(
-                            id = UUID.randomUUID().toString(),
-                            conversationId = convId,
-                            role = "assistant",
-                            content = errorText
+                if (selectedModel.state != ModelState.ACTIVE ||
+                    !llmEngine.isModelLoaded ||
+                    llmEngine.currentLoadedModel?.id != selectedModel.id
+                ) {
+                    val activated = activateModelInternal(selectedModel.id, persistSelection = true)
+                    if (!activated) {
+                        insertAssistantMessage(
+                            conversationId,
+                            "Unable to load model ${selectedModel.name}. Check Engine Logs for details."
                         )
-                        messageDao.insertMessage(errorMsgEntity)
-                        _isGenerating.value = false
-                        _streamingMessage.value = ""
                         return@launch
                     }
                 }
 
-                val history = _messages.value.map { it.role to it.content }
+                val history = messageDao.getMessagesList(conversationId).map { it.role to it.content }
                 val prompt = llmEngine.formatPrompt(
                     modelId = _selectedModelId.value,
                     conversationHistory = history,
                     userQuery = userQuery
                 )
 
-                val stringBuffer = StringBuilder()
-                var calculatedMetrics: InferenceMetrics? = null
+                val streamedText = StringBuilder()
+                var metrics: InferenceMetrics? = null
 
                 llmEngine.generateStreaming(
                     prompt = prompt,
                     userQuery = userQuery,
                     maxTokens = 1024,
-                    onMetricsCalculated = { metrics: InferenceMetrics ->
-                        calculatedMetrics = metrics
+                    onMetricsCalculated = { calculated ->
+                        metrics = calculated
                     }
-                ).collect { tokenChunk: String ->
-                    stringBuffer.append(tokenChunk)
-                    _streamingMessage.value = stringBuffer.toString()
+                ).collect { tokenChunk ->
+                    streamedText.append(tokenChunk)
+                    _streamingMessage.value = streamedText.toString()
                 }
 
-                val finalContent = stringBuffer.toString()
-                if (finalContent.isNotBlank()) {
-                    val aiMessageId = UUID.randomUUID().toString()
-
-                    val metricsJson = calculatedMetrics?.let {
+                val finalText = streamedText.toString().trim()
+                if (finalText.isNotBlank()) {
+                    val metricsJson = metrics?.let {
                         JSONObject().apply {
                             put("timeToFirstTokenMs", it.timeToFirstTokenMs)
                             put("tokensPerSec", it.tokensPerSec)
@@ -272,31 +309,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     val aiMessage = MessageEntity(
-                        id = aiMessageId,
-                        conversationId = convId,
+                        id = UUID.randomUUID().toString(),
+                        conversationId = conversationId,
                         role = "assistant",
-                        content = finalContent,
+                        content = finalText,
                         metricsJson = metricsJson
                     )
-
                     messageDao.insertMessage(aiMessage)
 
-                    // Check if there is an automatic action to execute immediately
-                    val parseResult = ActionParser.parse(finalContent)
+                    val parseResult = ActionParser.parse(finalText)
                     if (parseResult.hasAction && parseResult.action != null && !parseResult.action.requiresConfirmation) {
                         executeAction(parseResult.action)
                     }
                 }
             } catch (e: Exception) {
                 if (e !is kotlinx.coroutines.CancellationException) {
-                    val errorMsg = "Generation failed: ${e.localizedMessage ?: "Unexpected inference error"}"
-                    val errorEntity = MessageEntity(
-                        id = UUID.randomUUID().toString(),
-                        conversationId = convId,
-                        role = "assistant",
-                        content = errorMsg
+                    insertAssistantMessage(
+                        conversationId,
+                        "Unable to generate a response: ${e.localizedMessage ?: "unknown inference error"}"
                     )
-                    messageDao.insertMessage(errorEntity)
                 }
             } finally {
                 _isGenerating.value = false
@@ -308,43 +339,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopGeneration() {
         llmEngine.stopGeneration()
         activeGenerationJob?.cancel()
-        val partialContent = _streamingMessage.value
-        val convId = _currentConversationId.value
-        if (partialContent.isNotBlank() && convId != null) {
+
+        val partial = _streamingMessage.value
+        val conversationId = _currentConversationId.value
+        if (partial.isNotBlank() && conversationId != null) {
             viewModelScope.launch(Dispatchers.IO) {
-                val aiMessage = MessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = convId,
-                    role = "assistant",
-                    content = partialContent
-                )
-                messageDao.insertMessage(aiMessage)
+                insertAssistantMessage(conversationId, partial)
             }
         }
+
         _isGenerating.value = false
         _streamingMessage.value = ""
     }
 
     fun startVoiceListening() {
-        _voiceState.value = VoiceState.LISTENING
-        _voiceTranscript.value = ""
-        audioRecorder.startRecording(viewModelScope)
+        viewModelScope.launch(Dispatchers.IO) {
+            if (_voiceState.value != VoiceState.IDLE) {
+                return@launch
+            }
+
+            val whisperModel = modelRepository.getModel(ModelId.WHISPER_BASE)
+            if (whisperModel == null || whisperModel.state !in setOf(ModelState.READY, ModelState.ACTIVE)) {
+                _voiceTranscript.value = "Download Whisper to use voice input."
+                _voiceState.value = VoiceState.ERROR
+                return@launch
+            }
+
+            if (!whisperEngine.isModelLoaded) {
+                val loaded = whisperEngine.loadModel(whisperModel)
+                if (!loaded) {
+                    _voiceTranscript.value = "Unable to initialize Whisper model."
+                    _voiceState.value = VoiceState.ERROR
+                    return@launch
+                }
+            }
+
+            _voiceTranscript.value = ""
+            _voiceState.value = VoiceState.LISTENING
+            audioRecorder.startRecording(viewModelScope)
+        }
     }
 
     fun stopVoiceListening() {
-        _voiceState.value = VoiceState.TRANSCRIBING
-        val pcmAudio = audioRecorder.stopRecording()
+        viewModelScope.launch(Dispatchers.IO) {
+            if (_voiceState.value != VoiceState.LISTENING) {
+                return@launch
+            }
 
-        viewModelScope.launch {
+            _voiceState.value = VoiceState.TRANSCRIBING
+            val pcmAudio = audioRecorder.stopRecording()
             val transcript = whisperEngine.transcribe(pcmAudio)
-            _voiceTranscript.value = transcript
 
+            _voiceTranscript.value = transcript
             if (transcript.isNotBlank()) {
-                _voiceState.value = VoiceState.THINKING
-                sendMessage(transcript, isVoice = true)
+                _composerText.value = transcript
                 _voiceState.value = VoiceState.IDLE
             } else {
-                _voiceState.value = VoiceState.IDLE
+                _voiceState.value = VoiceState.ERROR
+                _voiceTranscript.value = "No speech detected."
             }
         }
     }
@@ -373,15 +425,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadModel(modelId: ModelId) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             modelRepository.downloadModel(modelId)
         }
     }
 
-    fun deleteModel(modelId: ModelId) {
-        viewModelScope.launch {
-            modelRepository.deleteModel(modelId)
+    fun retryModelDownload(modelId: ModelId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.retryDownload(modelId)
         }
+    }
+
+    fun pauseModelDownload(modelId: ModelId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.pauseDownload(modelId)
+        }
+    }
+
+    fun resumeModelDownload(modelId: ModelId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.resumeDownload(modelId)
+        }
+    }
+
+    fun cancelModelDownload(modelId: ModelId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.cancelDownload(modelId)
+        }
+    }
+
+    fun deleteModel(modelId: ModelId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (llmEngine.currentLoadedModel?.id == modelId) {
+                llmEngine.unloadModel()
+            }
+            if (modelId == ModelId.WHISPER_BASE && whisperEngine.isModelLoaded) {
+                whisperEngine.unloadModel()
+            }
+
+            modelRepository.deleteModel(modelId)
+            _selectedModelId.value = modelRepository.selectedModelId.value
+
+            if (modelId != ModelId.WHISPER_BASE) {
+                activateStartupDefaultModel()
+            }
+        }
+    }
+
+    fun refreshModelsFromStorage() {
+        viewModelScope.launch(Dispatchers.IO) {
+            modelRepository.reconcileInstalledModels(verifyChecksum = false)
+        }
+    }
+
+    private suspend fun insertAssistantMessage(conversationId: String, content: String) {
+        val message = MessageEntity(
+            id = UUID.randomUUID().toString(),
+            conversationId = conversationId,
+            role = "assistant",
+            content = content
+        )
+        messageDao.insertMessage(message)
+    }
+
+    private fun recommendedThreadCount(): Int {
+        return Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
     }
 
     private fun updateDeviceMetrics() {
@@ -389,12 +497,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val usedMem = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
         _deviceRamUsageMb.value = usedMem
 
-        val bm = getApplication<Application>().getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        _batteryLevel.value = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val batteryManager = getApplication<Application>()
+            .getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        _batteryLevel.value = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
     }
 
     override fun onCleared() {
         super.onCleared()
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { llmEngine.unloadModel() }
+            runCatching { whisperEngine.unloadModel() }
+        }
         ttsManager.shutdown()
+    }
+
+    companion object {
+        private const val DEFAULT_RUNTIME_CONTEXT = 8192
+        private const val DUPLICATE_WINDOW_MS = 800L
     }
 }

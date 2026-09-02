@@ -1,5 +1,7 @@
 package com.myai.offline
 
+import com.myai.offline.data.model.ModelConstants
+import com.myai.offline.data.model.ModelId
 import com.myai.offline.data.model.VoiceState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -55,5 +57,14 @@ class VoiceStateTest {
         // Recovery back to IDLE
         currentState = VoiceState.IDLE
         assertEquals(VoiceState.IDLE, currentState)
+    }
+
+    @Test
+    fun testWhisperModelIsSeparatedFromChatModelList() {
+        val whisper = ModelConstants.INITIAL_MODELS.first { it.id == ModelId.WHISPER_BASE }
+        assertTrue(whisper.isWhisper)
+
+        val chatModels = ModelConstants.INITIAL_MODELS.filter { it.isChatModel }
+        assertFalse(chatModels.any { it.id == ModelId.WHISPER_BASE })
     }
 }

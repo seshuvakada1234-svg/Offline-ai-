@@ -89,6 +89,7 @@ fun ChatScreen(
     messages: List<MessageEntity>,
     streamingMessage: String,
     isGenerating: Boolean,
+    composerText: String,
     models: List<ModelInfo>,
     selectedModelId: ModelId,
     voiceState: VoiceState,
@@ -98,6 +99,7 @@ fun ChatScreen(
     currentlySpeakingMessageId: String?,
     drawerState: DrawerState,
     onSendMessage: (String) -> Unit,
+    onComposerTextChange: (String) -> Unit,
     onStopGeneration: () -> Unit,
     onSelectModel: (ModelId) -> Unit,
     onOpenModelManager: () -> Unit,
@@ -109,13 +111,14 @@ fun ChatScreen(
     onActionConfirm: (AssistantAction) -> Unit,
     onActionCancel: (AssistantAction) -> Unit
 ) {
-    var inputText by remember { mutableStateOf("") }
     var showModelSheet by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
     val currentModel = models.firstOrNull { it.id == selectedModelId }
-    val isModelReady = currentModel?.state == ModelState.READY
+    val modelState = currentModel?.state ?: ModelState.NOT_INSTALLED
+    val canChat = modelState == ModelState.READY || modelState == ModelState.ACTIVE
+    val isModelActive = modelState == ModelState.ACTIVE
 
     // Auto-scroll when new message arrives or streaming updates
     val totalCount = messages.size + if (isGenerating) 1 else 0
@@ -167,12 +170,12 @@ fun ChatScreen(
                                 Icon(
                                     imageVector = Icons.Default.ElectricBolt,
                                     contentDescription = null,
-                                    tint = if (isModelReady) PrimaryIndigo else AccentAmber,
+                                    tint = if (canChat) PrimaryIndigo else AccentAmber,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = currentModel?.name ?: "Qwen3 1.7B",
+                                    text = currentModel?.name ?: "No model",
                                     color = TextPrimary,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold
@@ -193,19 +196,39 @@ fun ChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (isModelReady) AccentTeal.copy(alpha = 0.12f) else AccentAmber.copy(alpha = 0.12f))
+                            .background(
+                                when {
+                                    isModelActive -> AccentTeal.copy(alpha = 0.12f)
+                                    canChat -> PrimaryIndigo.copy(alpha = 0.12f)
+                                    else -> AccentAmber.copy(alpha = 0.12f)
+                                }
+                            )
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = "Offline On-Device AI",
-                            tint = if (isModelReady) AccentTeal else AccentAmber,
+                            tint = when {
+                                isModelActive -> AccentTeal
+                                canChat -> PrimaryIndigo
+                                else -> AccentAmber
+                            },
                             modifier = Modifier.size(12.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isModelReady) "Offline" else "Download needed",
-                            color = if (isModelReady) AccentTeal else AccentAmber,
+                            text = when {
+                                isModelActive -> "Active"
+                                canChat -> "Installed"
+                                modelState == ModelState.LOADING -> "Loading"
+                                else -> "Download needed"
+                            },
+                            color = when {
+                                isModelActive -> AccentTeal
+                                canChat -> PrimaryIndigo
+                                modelState == ModelState.LOADING -> PrimaryIndigo
+                                else -> AccentAmber
+                            },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -246,8 +269,8 @@ fun ChatScreen(
 
                         // Multiline Text Field
                         BasicTextField(
-                            value = inputText,
-                            onValueChange = { inputText = it },
+                            value = composerText,
+                            onValueChange = onComposerTextChange,
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(horizontal = 6.dp, vertical = 8.dp),
@@ -258,9 +281,14 @@ fun ChatScreen(
                             ),
                             cursorBrush = SolidColor(PrimaryIndigo),
                             decorationBox = { innerTextField ->
-                                if (inputText.isEmpty()) {
+                                if (composerText.isEmpty()) {
                                     Text(
-                                        text = if (isGenerating) "Generating response..." else "Ask anything...",
+                                        text = when {
+                                            isGenerating -> "Generating response..."
+                                            canChat -> "Ask anything..."
+                                            modelState == ModelState.ERROR -> "Unable to load model. Check Engine Logs."
+                                            else -> "Download ${currentModel?.name ?: "a model"} to chat."
+                                        },
                                         color = TextMuted,
                                         fontSize = 14.sp
                                     )
@@ -299,12 +327,12 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            val canSend = inputText.isNotBlank()
+                            val canSend = composerText.isNotBlank() && canChat
                             IconButton(
                                 onClick = {
                                     if (canSend) {
-                                        onSendMessage(inputText)
-                                        inputText = ""
+                                        onSendMessage(composerText)
+                                        onComposerTextChange("")
                                     }
                                 },
                                 enabled = canSend,
@@ -333,9 +361,9 @@ fun ChatScreen(
                 if (messages.isEmpty() && !isGenerating) {
                     // Modern Empty State
                     EmptyChatSuggestions(
-                        selectedModelName = currentModel?.name ?: "Qwen3 1.7B",
+                        selectedModelName = currentModel?.name ?: "No active model",
                         onSelectSuggestion = { suggestion ->
-                            onSendMessage(suggestion)
+                            onComposerTextChange(suggestion)
                         }
                     )
                 } else {
@@ -350,7 +378,7 @@ fun ChatScreen(
                             MessageItem(
                                 message = message,
                                 isSpeakingThis = isSpeaking && currentlySpeakingMessageId == message.id,
-                                modelName = currentModel?.name ?: "Qwen3 1.7B",
+                                modelName = currentModel?.name ?: "No model",
                                 isThinking = false,
                                 onSpeakClick = { content -> onSpeakMessage(message.id, content) },
                                 onStopSpeakClick = onStopSpeaking,
@@ -370,7 +398,7 @@ fun ChatScreen(
                                         content = streamingMessage
                                     ),
                                     isSpeakingThis = false,
-                                    modelName = currentModel?.name ?: "Qwen3 1.7B",
+                                    modelName = currentModel?.name ?: "No model",
                                     isThinking = streamingMessage.isEmpty(),
                                     onSpeakClick = {},
                                     onStopSpeakClick = {},

@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
                 val messages by viewModel.messages.collectAsState()
                 val streamingMessage by viewModel.streamingMessage.collectAsState()
                 val isGenerating by viewModel.isGenerating.collectAsState()
+                val composerText by viewModel.composerText.collectAsState()
                 val models by viewModel.models.collectAsState()
                 val selectedModelId by viewModel.selectedModelId.collectAsState()
                 val voiceState by viewModel.voiceState.collectAsState()
@@ -98,6 +99,7 @@ class MainActivity : ComponentActivity() {
                                 messages = messages,
                                 streamingMessage = streamingMessage,
                                 isGenerating = isGenerating,
+                                composerText = composerText,
                                 models = models,
                                 selectedModelId = selectedModelId,
                                 voiceState = voiceState,
@@ -107,6 +109,7 @@ class MainActivity : ComponentActivity() {
                                 currentlySpeakingMessageId = currentlySpeakingMessageId,
                                 drawerState = drawerState,
                                 onSendMessage = { text -> viewModel.sendMessage(text) },
+                                onComposerTextChange = { text -> viewModel.updateComposerText(text) },
                                 onStopGeneration = { viewModel.stopGeneration() },
                                 onSelectModel = { id -> viewModel.selectModel(id) },
                                 onOpenModelManager = { navController.navigate("models") },
@@ -134,7 +137,12 @@ class MainActivity : ComponentActivity() {
                                 selectedModelId = selectedModelId,
                                 onSelectModel = { id -> viewModel.selectModel(id) },
                                 onDownloadModel = { id -> viewModel.downloadModel(id) },
+                                onPauseDownload = { id -> viewModel.pauseModelDownload(id) },
+                                onResumeDownload = { id -> viewModel.resumeModelDownload(id) },
+                                onCancelDownload = { id -> viewModel.cancelModelDownload(id) },
+                                onRetryDownload = { id -> viewModel.retryModelDownload(id) },
                                 onDeleteModel = { id -> viewModel.deleteModel(id) },
+                                onRefreshModels = { viewModel.refreshModelsFromStorage() },
                                 onBack = { navController.popBackStack() }
                             )
                         }

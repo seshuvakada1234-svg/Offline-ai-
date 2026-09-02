@@ -13,7 +13,7 @@ object NativeWhisperBridge {
             Log.i(TAG, "Native whisper bridge loaded successfully.")
             nativeInit()
         } catch (e: UnsatisfiedLinkError) {
-            Log.w(TAG, "libmyai_native.so not found for whisper, will use fallback audio pipeline: ${e.message}")
+            Log.w(TAG, "libmyai_native.so not found for whisper: ${e.message}")
             isLoaded = false
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing whisper JNI", e)

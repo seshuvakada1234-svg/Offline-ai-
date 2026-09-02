@@ -11,20 +11,29 @@ class WhisperEngine(private val context: Context) {
     private val TAG = "WhisperEngine"
     private var activeModelHandle: Long = 0L
     private var isLoaded: Boolean = false
+    private var loadedModelFile: File? = null
 
     val isModelLoaded: Boolean
         get() = isLoaded && activeModelHandle != 0L
 
     suspend fun loadModel(modelInfo: ModelInfo): Boolean = withContext(Dispatchers.IO) {
-        val modelFile = File(context.filesDir, "models/${modelInfo.filename}")
-        Log.i(TAG, "Loading Whisper model from: ${modelFile.absolutePath}")
+        val modelFile = File(File(context.filesDir, "models/${modelInfo.id.rawValue}"), modelInfo.filename)
+        Log.i(TAG, "[WHISPER_INIT] Loading Whisper model from ${modelFile.absolutePath}")
 
         if (NativeWhisperBridge.isAvailable() && modelFile.exists() && modelFile.length() > 0) {
             activeModelHandle = NativeWhisperBridge.nativeLoadModel(modelFile.absolutePath)
             isLoaded = (activeModelHandle != 0L)
+            loadedModelFile = if (isLoaded) modelFile else null
+            if (isLoaded) {
+                Log.i(TAG, "[WHISPER_INIT] Whisper model initialized successfully")
+            } else {
+                Log.e(TAG, "[WHISPER_INIT] Whisper initialization failed")
+            }
         } else {
             activeModelHandle = 0L
             isLoaded = false
+            loadedModelFile = null
+            Log.e(TAG, "[WHISPER_INIT] Whisper native backend unavailable or model file missing")
         }
         isLoaded
     }
@@ -37,6 +46,7 @@ class WhisperEngine(private val context: Context) {
             activeModelHandle = 0L
         }
         isLoaded = false
+        loadedModelFile = null
     }
 
     /**
@@ -48,14 +58,17 @@ class WhisperEngine(private val context: Context) {
             return@withContext ""
         }
 
-        Log.i(TAG, "Transcribing ${pcmSamples.size} audio samples (lang=$language)")
+        Log.i(TAG, "[WHISPER_TRANSCRIPTION_START] samples=${pcmSamples.size} lang=$language model=${loadedModelFile?.name ?: "none"}")
 
         if (NativeWhisperBridge.isAvailable() && activeModelHandle != 0L) {
             val result = NativeWhisperBridge.nativeTranscribe(activeModelHandle, pcmSamples, language)
             if (result.isNotBlank()) {
+                Log.i(TAG, "[WHISPER_TRANSCRIPTION_COMPLETE] chars=${result.length}")
                 return@withContext result
             }
         }
+
+        Log.e(TAG, "[WHISPER_TRANSCRIPTION_COMPLETE] empty_result")
 
         ""
     }

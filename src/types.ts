@@ -3,7 +3,6 @@ export type ModelId =
   | 'qwen3-4b'
   | 'phi4-mini'
   | 'gemma3-4b'
-  | 'gemma3-270m'
   | 'whisper-base';
 
 export type ModelState =

@@ -5,6 +5,7 @@
 #include <thread>
 #include <vector>
 #include <sstream>
+#include <cstdio>
 #include <sys/stat.h>
 #include <android/log.h>
 
@@ -72,6 +73,12 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeLoadModel(
 
     if (bytes_read < 4) {
         LOGE("Model file too small: %s", model_path);
+        env->ReleaseStringUTFChars(model_path_jstr, model_path);
+        return 0L;
+    }
+
+    if (!(header[0] == 'G' && header[1] == 'G' && header[2] == 'U' && header[3] == 'F')) {
+        LOGE("Invalid GGUF magic for model: %s", model_path);
         env->ReleaseStringUTFChars(model_path_jstr, model_path);
         return 0L;
     }
@@ -194,13 +201,10 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
         return (cont == JNI_TRUE);
     };
 
-    // Native inference loop
-    // Process input prompt tokens and evaluate output sequence
-    // Supports on-the-fly streaming emission and immediate cancellation
-
+    LOGE("nativeGenerate is called, but real llama.cpp token generation is not linked in this build.");
     g_is_generating.store(false);
-    LOGI("Native generation finished. Emitted %d tokens.", tokens_generated);
-    return tokens_generated;
+    LOGE("Native generation finished with failure. Emitted %d tokens.", tokens_generated);
+    return -10;
 }
 
 }

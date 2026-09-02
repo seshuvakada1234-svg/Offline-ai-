@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <cstdio>
 #include <sys/stat.h>
 #include <android/log.h>
 
@@ -42,6 +43,34 @@ Java_com_myai_offline_voice_NativeWhisperBridge_nativeLoadModel(
     struct stat st;
     if (stat(model_path, &st) != 0 || st.st_size <= 0) {
         LOGE("Whisper model file not found or empty: %s", model_path);
+        env->ReleaseStringUTFChars(model_path_jstr, model_path);
+        return 0L;
+    }
+
+    FILE *f = fopen(model_path, "rb");
+    if (!f) {
+        LOGE("Failed to open whisper model file: %s", model_path);
+        env->ReleaseStringUTFChars(model_path_jstr, model_path);
+        return 0L;
+    }
+
+    char header[4] = {0};
+    size_t bytes_read = fread(header, 1, 4, f);
+    fclose(f);
+
+    if (bytes_read < 4) {
+        LOGE("Whisper model file header is too small: %s", model_path);
+        env->ReleaseStringUTFChars(model_path_jstr, model_path);
+        return 0L;
+    }
+
+    bool valid_magic =
+        (header[0] == 'g' && header[1] == 'g' && header[2] == 'm' && header[3] == 'l') ||
+        (header[0] == 'g' && header[1] == 'g' && header[2] == 'm' && header[3] == 'f') ||
+        (header[0] == 'g' && header[1] == 'g' && header[2] == 'j' && header[3] == 't');
+
+    if (!valid_magic) {
+        LOGE("Invalid Whisper model header magic: %s", model_path);
         env->ReleaseStringUTFChars(model_path_jstr, model_path);
         return 0L;
     }
@@ -103,6 +132,8 @@ Java_com_myai_offline_voice_NativeWhisperBridge_nativeTranscribe(
     if (lang_jstr) {
         env->ReleaseStringUTFChars(lang_jstr, lang);
     }
+
+    LOGE("nativeTranscribe called, but real whisper.cpp transcription is not linked in this build.");
 
     return env->NewStringUTF("");
 }

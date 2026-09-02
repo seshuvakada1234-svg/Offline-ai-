@@ -5,6 +5,7 @@ import com.myai.offline.data.model.AssistantActionType
 import com.myai.offline.data.model.ModelId
 import com.myai.offline.data.model.ModelInfo
 import com.myai.offline.data.model.ModelState
+import com.myai.offline.data.model.ModelType
 import com.myai.offline.llm.PromptFormatter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -122,20 +123,22 @@ class LocalLLMEngineTest {
             name = "Qwen3 1.7B",
             tag = "Fast Assistant",
             description = "On-device LLM",
-            sizeFormatted = "1.18 GB",
-            sizeBytes = 1266679808L,
-            sha256Expected = "9a4f218c347b0e3568c09a842183e29f032e1858a74e9b98031d234ea576ef12",
+            sizeFormatted = "1.19 GB",
+            sizeBytes = 1282439264L,
+            sha256Expected = "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5",
+            repository = "ggml-org/Qwen3-1.7B-GGUF",
             filename = "Qwen3-1.7B-Q4_K_M.gguf",
-            sourceUrl = "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
+            sourceUrl = "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
             contextSize = 4096,
             quant = "Q4_K_M",
-            backend = "llama.cpp",
+            modelType = ModelType.CHAT_LLM,
+            capabilities = listOf("chat"),
             architecture = "qwen3",
             state = ModelState.READY,
-            progress = 100
+            downloadedBytes = 1282439264L
         )
 
         assertEquals(ModelState.READY, readyModel.state)
-        assertTrue(readyModel.progress == 100)
+        assertTrue(readyModel.downloadProgress == 1.0f)
     }
 }

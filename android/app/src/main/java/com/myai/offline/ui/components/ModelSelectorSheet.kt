@@ -109,9 +109,11 @@ fun ModelSelectorSheet(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                items(models) { model ->
+                val chatModels = models.filter { it.isChatModel }
+                items(chatModels) { model ->
                     val isSelected = model.id == selectedModelId
-                    val isReady = model.state == ModelState.READY
+                    val isReady = model.state == ModelState.READY || model.state == ModelState.ACTIVE
+                    val isActive = model.state == ModelState.ACTIVE
                     val shape = RoundedCornerShape(14.dp)
 
                     Row(
@@ -206,8 +208,8 @@ fun ModelSelectorSheet(
                             }
                             isReady -> {
                                 Text(
-                                    text = "Ready",
-                                    color = AccentTeal,
+                                    text = if (isActive) "Active" else "Installed",
+                                    color = if (isActive) AccentTeal else PrimaryIndigo,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -216,13 +218,13 @@ fun ModelSelectorSheet(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
                                         imageVector = Icons.Default.Download,
-                                        contentDescription = "Download required",
+                                        contentDescription = "Not installed",
                                         tint = AccentAmber,
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "Download",
+                                        text = "Not installed",
                                         color = AccentAmber,
                                         fontSize = 11.sp
                                     )

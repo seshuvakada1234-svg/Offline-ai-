@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
 
 class LocalLLMEngine(
@@ -44,19 +45,20 @@ class LocalLLMEngine(
                 unloadModel()
             }
 
-            val modelFile = File(context.filesDir, "models/${model.filename}")
+            val modelFile = File(File(context.filesDir, "models/${model.id.rawValue}"), model.filename)
             if (!modelFile.exists() || modelFile.length() == 0L) {
                 val errorMsg = "GGUF model file not found at ${modelFile.absolutePath}. Please download ${model.name} (${model.sizeFormatted}) first."
-                Log.e(TAG, "[MODEL_LOAD_FAILURE] $errorMsg")
+                Log.e(TAG, "[MODEL_LOAD_FAILED] $errorMsg")
                 throw IllegalStateException(errorMsg)
             }
 
             if (!NativeLlamaBridge.isAvailable()) {
                 val errorMsg = "Native library libmyai_native.so is not available. Please verify NDK build configuration."
-                Log.e(TAG, "[MODEL_LOAD_FAILURE] $errorMsg")
+                Log.e(TAG, "[MODEL_LOAD_FAILED] $errorMsg")
                 throw IllegalStateException(errorMsg)
             }
 
+            Log.i(TAG, "[CONTEXT_CREATE_START] Creating llama context for ${model.name} with ctx=$ctxSize threads=$threads")
             val handle = NativeLlamaBridge.nativeLoadModel(
                 modelPath = modelFile.absolutePath,
                 nThreads = threads,
@@ -65,9 +67,26 @@ class LocalLLMEngine(
 
             if (handle == 0L) {
                 val errorMsg = "Failed to load GGUF weights into llama.cpp memory for ${model.name}. File may be corrupted or incompatible."
-                Log.e(TAG, "[MODEL_LOAD_FAILURE] $errorMsg")
+                Log.e(TAG, "[MODEL_LOAD_FAILED] $errorMsg")
                 throw IllegalStateException(errorMsg)
             }
+
+            if (!NativeLlamaBridge.nativeIsModelLoaded(handle)) {
+                NativeLlamaBridge.nativeUnloadModel(handle)
+                val errorMsg = "llama.cpp context creation failed for ${model.name}."
+                Log.e(TAG, "[CONTEXT_CREATE_FAILED] $errorMsg")
+                throw IllegalStateException(errorMsg)
+            }
+
+            val readinessProbeOk = runInferenceReadinessProbe(handle)
+            if (!readinessProbeOk) {
+                NativeLlamaBridge.nativeUnloadModel(handle)
+                val errorMsg = "Inference readiness probe failed for ${model.name}. Model generated no token during warmup."
+                Log.e(TAG, "[MODEL_LOAD_FAILED] $errorMsg")
+                throw IllegalStateException(errorMsg)
+            }
+
+            Log.i(TAG, "[CONTEXT_CREATE_SUCCESS] Context created for ${model.name}")
 
             activeModelHandle = handle
             loadedModel = model
@@ -90,6 +109,27 @@ class LocalLLMEngine(
             }
             loadedModel = null
             Log.i(TAG, "Model unloaded successfully")
+        }
+    }
+
+    private fun runInferenceReadinessProbe(handle: Long): Boolean {
+        val tokenCounter = AtomicInteger(0)
+        return try {
+            val emitted = NativeLlamaBridge.nativeGenerate(
+                modelHandle = handle,
+                prompt = "Hello",
+                maxTokens = 1,
+                callback = LlamaTokenCallback { token ->
+                    if (token.isNotBlank()) {
+                        tokenCounter.incrementAndGet()
+                    }
+                    false
+                }
+            )
+            emitted > 0 && tokenCounter.get() > 0
+        } catch (e: Exception) {
+            Log.e(TAG, "[MODEL_LOAD_FAILED] Warmup generation failed", e)
+            false
         }
     }
 
@@ -158,10 +198,11 @@ class LocalLLMEngine(
 
         try {
             val tokenChannel = Channel<String>(capacity = Channel.UNLIMITED)
+            var nativeReturnCode = 0
 
             val backgroundInferenceJob = CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    NativeLlamaBridge.nativeGenerate(
+                    nativeReturnCode = NativeLlamaBridge.nativeGenerate(
                         modelHandle = handle,
                         prompt = prompt,
                         maxTokens = maxTokens,
@@ -196,6 +237,12 @@ class LocalLLMEngine(
 
             backgroundInferenceJob.join()
 
+            if (tokenCount == 0 || nativeReturnCode <= 0) {
+                val error = "Native inference failed to emit tokens (returnCode=$nativeReturnCode)."
+                Log.e(TAG, "[INFERENCE_ERROR] $error")
+                throw IllegalStateException(error)
+            }
+
             val totalDuration = maxOf(1L, System.currentTimeMillis() - startTime)
             val tokensPerSec = if (totalDuration > 0) {
                 (tokenCount.toDouble() / (totalDuration.toDouble() / 1000.0))
@@ -203,7 +250,7 @@ class LocalLLMEngine(
 
             Log.i(
                 TAG,
-                "[INFERENCE_END] Model: ${model.name}, Tokens: $tokenCount, Duration: ${totalDuration}ms, Speed: ${String.format("%.1f", tokensPerSec)} t/s"
+                "[INFERENCE_COMPLETE] Model: ${model.name}, Tokens: $tokenCount, Duration: ${totalDuration}ms, Speed: ${String.format("%.1f", tokensPerSec)} t/s"
             )
 
             val metrics = InferenceMetrics(
@@ -219,8 +266,8 @@ class LocalLLMEngine(
         } catch (e: CancellationException) {
             Log.i(TAG, "[GENERATION_CANCELLED] Inference job was cancelled.")
         } catch (e: Exception) {
-            Log.e(TAG, "Error during native LLM inference", e)
-            emit("\n[Error during generation: ${e.localizedMessage}]")
+            Log.e(TAG, "[INFERENCE_ERROR] Error during native LLM inference", e)
+            emit("\n[Inference error: ${e.localizedMessage}]")
         } finally {
             isGenerating.set(false)
             activeInferenceJob = null

@@ -67,7 +67,7 @@ import org.json.JSONObject
 fun MessageItem(
     message: MessageEntity,
     isSpeakingThis: Boolean,
-    modelName: String = "Qwen3 1.7B",
+    modelName: String = "Local model",
     isThinking: Boolean = false,
     onSpeakClick: (String) -> Unit,
     onStopSpeakClick: () -> Unit,
