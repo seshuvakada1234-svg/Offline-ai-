@@ -25,7 +25,11 @@ class ModelManagerTest {
     @Test
     fun testManifestHasRequiredModelsAndNoFakeReadyState() {
         val initialModels = ModelConstants.INITIAL_MODELS
-        assertEquals(5, initialModels.size)
+        assertEquals(ModelManifest.entries.size, initialModels.size)
+        assertEquals(
+            ModelManifest.entries.map { it.id }.toSet(),
+            initialModels.map { it.id }.toSet()
+        )
 
         initialModels.forEach { model ->
             assertEquals(ModelState.NOT_INSTALLED, model.state)
