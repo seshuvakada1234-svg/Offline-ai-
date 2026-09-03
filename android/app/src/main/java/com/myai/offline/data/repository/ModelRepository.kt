@@ -7,7 +7,9 @@ import android.util.Log
 import com.myai.offline.data.model.ModelConstants
 import com.myai.offline.data.model.ModelId
 import com.myai.offline.data.model.ModelInfo
+import com.myai.offline.data.model.ModelPackageType
 import com.myai.offline.data.model.ModelState
+import com.myai.offline.data.model.ModelType
 import com.myai.offline.llm.NativeLlamaBridge
 import com.myai.offline.voice.NativeWhisperBridge
 import kotlinx.coroutines.CancellationException
@@ -21,6 +23,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -78,12 +84,36 @@ class ModelRepository(
 
             when {
                 finalFile.exists() -> {
-                    val validation = validateModelFile(
+                    var validation = validateInstalledModelArtifacts(
                         model = model,
                         file = finalFile,
                         verifyChecksum = verifyChecksum,
                         verifyRuntimeLoad = false
                     )
+
+                    if (!validation.isValid && model.packageType == ModelPackageType.TAR_BZ2_ARCHIVE) {
+                        val archiveValidation = validateModelFile(
+                            model = model,
+                            file = finalFile,
+                            verifyChecksum = verifyChecksum,
+                            verifyRuntimeLoad = false
+                        )
+
+                        if (archiveValidation.isValid) {
+                            val installValidation = installArchiveModel(model, finalFile)
+                            validation = if (installValidation.isValid) {
+                                validateInstalledModelArtifacts(
+                                    model = model,
+                                    file = finalFile,
+                                    verifyChecksum = verifyChecksum,
+                                    verifyRuntimeLoad = false
+                                )
+                            } else {
+                                installValidation
+                            }
+                        }
+                    }
+
                     if (validation.isValid) {
                         model.copy(
                             state = if (model.state == ModelState.ACTIVE) ModelState.ACTIVE else ModelState.READY,
@@ -93,6 +123,7 @@ class ModelRepository(
                         )
                     } else {
                         finalFile.delete()
+                        clearExtractedResources(model)
                         model.copy(
                             state = ModelState.NOT_INSTALLED,
                             downloadedBytes = 0L,
@@ -138,7 +169,14 @@ class ModelRepository(
     }
 
     fun getModelDirectory(model: ModelInfo): File {
-        val dir = File(getModelsDir(), model.id.rawValue)
+        val groupedRoot = File(getModelsDir(), modelStorageBucket(model.modelType))
+        if (!groupedRoot.exists()) {
+            groupedRoot.mkdirs()
+        }
+
+        val dir = File(groupedRoot, model.id.rawValue)
+        migrateLegacyModelDirectoryIfNeeded(model, dir)
+
         if (!dir.exists()) {
             dir.mkdirs()
         }
@@ -155,6 +193,46 @@ class ModelRepository(
 
     fun getModelFile(filename: String): File {
         return File(getModelsDir(), filename)
+    }
+
+    fun findInstalledResource(model: ModelInfo, requiredName: String): File? {
+        val modelDir = getModelDirectory(model)
+        return findRequiredEntry(modelDir, requiredName)
+    }
+
+    private fun modelStorageBucket(modelType: ModelType): String {
+        return when (modelType) {
+            ModelType.CHAT_LLM -> MODELS_DIR_LLM
+            ModelType.SPEECH_TO_TEXT -> MODELS_DIR_STT
+            ModelType.TEXT_TO_SPEECH -> MODELS_DIR_TTS
+        }
+    }
+
+    private fun migrateLegacyModelDirectoryIfNeeded(model: ModelInfo, destinationDir: File) {
+        val legacyDir = File(getModelsDir(), model.id.rawValue)
+        if (!legacyDir.exists() || legacyDir.absolutePath == destinationDir.absolutePath) {
+            return
+        }
+
+        val legacyFiles = legacyDir.listFiles().orEmpty()
+        if (legacyFiles.isEmpty()) {
+            runCatching { legacyDir.delete() }
+            return
+        }
+
+        val destinationFiles = destinationDir.listFiles().orEmpty()
+        if (destinationFiles.isNotEmpty()) {
+            return
+        }
+
+        val migrated = runCatching {
+            legacyDir.copyRecursively(destinationDir, overwrite = true)
+            legacyDir.deleteRecursively()
+        }.isSuccess
+
+        if (migrated) {
+            Log.i(TAG, "MODEL_DIR_MIGRATED id=${model.id.rawValue} from=${legacyDir.absolutePath} to=${destinationDir.absolutePath}")
+        }
     }
 
     fun getModel(id: ModelId): ModelInfo? {
@@ -437,6 +515,37 @@ class ModelRepository(
                     throw IllegalStateException(finalValidation.errorMessage ?: "Final file validation failed")
                 }
 
+                if (model.packageType == ModelPackageType.TAR_BZ2_ARCHIVE) {
+                    updateModel(id) {
+                        it.copy(
+                            state = ModelState.VERIFYING,
+                            downloadSpeed = STATUS_EXTRACTING,
+                            downloadedBytes = targetFile.length(),
+                            errorMessage = null,
+                            isLoaded = false
+                        )
+                    }
+
+                    val installValidation = installArchiveModel(model, targetFile)
+                    if (!installValidation.isValid) {
+                        clearExtractedResources(model)
+                        targetFile.delete()
+                        throw IllegalStateException(installValidation.errorMessage ?: "Archive extraction failed")
+                    }
+                }
+
+                val installedValidation = validateInstalledModelArtifacts(
+                    model = model,
+                    file = targetFile,
+                    verifyChecksum = !model.sha256Expected.isNullOrBlank(),
+                    verifyRuntimeLoad = false
+                )
+                if (!installedValidation.isValid) {
+                    clearExtractedResources(model)
+                    targetFile.delete()
+                    throw IllegalStateException(installedValidation.errorMessage ?: "Final installation validation failed")
+                }
+
                 updateModel(id) {
                     it.copy(
                         state = ModelState.READY,
@@ -539,8 +648,14 @@ class ModelRepository(
         }
 
         val targetFile = getModelFile(model)
-        val nextState = if (targetFile.exists()) ModelState.READY else ModelState.NOT_INSTALLED
-        val downloadedBytes = if (targetFile.exists()) targetFile.length() else 0L
+        val isInstalled = targetFile.exists() && validateInstalledModelArtifacts(
+            model = model,
+            file = targetFile,
+            verifyChecksum = false,
+            verifyRuntimeLoad = false
+        ).isValid
+        val nextState = if (isInstalled) ModelState.READY else ModelState.NOT_INSTALLED
+        val downloadedBytes = if (isInstalled) targetFile.length() else 0L
 
         updateModel(id) {
             it.copy(
@@ -561,14 +676,9 @@ class ModelRepository(
         downloadJobs.remove(id)
 
         val model = getModel(id) ?: return
-        val targetFile = getModelFile(model)
-        val partialFile = getDownloadFile(model)
-
-        if (targetFile.exists()) {
-            targetFile.delete()
-        }
-        if (partialFile.exists()) {
-            partialFile.delete()
+        val modelDir = getModelDirectory(model)
+        if (modelDir.exists()) {
+            modelDir.deleteRecursively()
         }
 
         updateModel(id) {
@@ -587,7 +697,7 @@ class ModelRepository(
     }
 
     fun verifyModelFile(model: ModelInfo, file: File): Boolean {
-        return validateModelFile(
+        return validateInstalledModelArtifacts(
             model = model,
             file = file,
             verifyChecksum = false,
@@ -1037,6 +1147,7 @@ class ModelRepository(
 
         return when (root) {
             is HttpStatusException -> when (root.responseCode) {
+                HttpURLConnection.HTTP_UNAUTHORIZED -> "Access denied by remote host (HTTP 401). ${model.name} may require authentication before download."
                 HttpURLConnection.HTTP_FORBIDDEN -> "Access denied by remote host (HTTP 403). Check repository/file permissions for ${model.name}."
                 HttpURLConnection.HTTP_NOT_FOUND -> "Model file not found (HTTP 404) for ${model.name}. Verify repository and filename."
                 429 -> "Remote host is rate limiting requests (HTTP 429). Please retry in a moment."
@@ -1108,14 +1219,26 @@ class ModelRepository(
             return ValidationResult(false, "Downloaded file appears to be HTML/error content, not a model file.")
         }
 
-        val headerOk = if (model.isWhisper) {
-            hasValidWhisperHeader(file)
-        } else {
-            hasValidGgufHeader(file)
+        val headerOk = when (model.packageType) {
+            ModelPackageType.SINGLE_FILE -> {
+                if (model.isWhisper) {
+                    hasValidWhisperHeader(file)
+                } else {
+                    hasValidGgufHeader(file)
+                }
+            }
+
+            ModelPackageType.TAR_BZ2_ARCHIVE -> hasValidTarBz2Header(file)
         }
 
         if (!headerOk) {
-            return ValidationResult(false, "Invalid model header/magic for ${model.filename}.")
+            return ValidationResult(
+                false,
+                when (model.packageType) {
+                    ModelPackageType.SINGLE_FILE -> "Invalid model header/magic for ${model.filename}."
+                    ModelPackageType.TAR_BZ2_ARCHIVE -> "Invalid archive header/magic for ${model.filename}."
+                }
+            )
         }
 
         var checksumVerified = false
@@ -1149,18 +1272,187 @@ class ModelRepository(
             )
         }
 
-        if (verifyRuntimeLoad) {
-            val runtimeValidation = if (model.isWhisper) {
-                verifyWhisperRuntime(file)
-            } else {
-                verifyLlamaRuntime(model = model, file = file)
+        if (verifyRuntimeLoad && model.packageType == ModelPackageType.SINGLE_FILE) {
+            val runtimeValidation = when {
+                model.isWhisper -> verifyWhisperRuntime(file)
+                model.isChatModel -> verifyLlamaRuntime(model = model, file = file)
+                else -> ValidationResult(true)
             }
+
             if (!runtimeValidation.isValid) {
                 return runtimeValidation
             }
         }
 
         return ValidationResult(true)
+    }
+
+    private fun validateInstalledModelArtifacts(
+        model: ModelInfo,
+        file: File,
+        verifyChecksum: Boolean,
+        verifyRuntimeLoad: Boolean
+    ): ValidationResult {
+        val fileValidation = validateModelFile(
+            model = model,
+            file = file,
+            verifyChecksum = verifyChecksum,
+            verifyRuntimeLoad = verifyRuntimeLoad
+        )
+        if (!fileValidation.isValid) {
+            return fileValidation
+        }
+
+        return when (model.packageType) {
+            ModelPackageType.SINGLE_FILE -> ValidationResult(true)
+            ModelPackageType.TAR_BZ2_ARCHIVE -> validateRequiredResourcesPresent(model)
+        }
+    }
+
+    private fun installArchiveModel(model: ModelInfo, archiveFile: File): ValidationResult {
+        if (model.packageType != ModelPackageType.TAR_BZ2_ARCHIVE) {
+            return ValidationResult(true)
+        }
+
+        val archiveValidation = validateModelFile(
+            model = model,
+            file = archiveFile,
+            verifyChecksum = !model.sha256Expected.isNullOrBlank(),
+            verifyRuntimeLoad = false
+        )
+        if (!archiveValidation.isValid) {
+            return archiveValidation
+        }
+
+        clearExtractedResources(model, preserveArchive = true)
+
+        val modelDir = getModelDirectory(model)
+        val extractionValidation = extractTarBz2Archive(
+            archiveFile = archiveFile,
+            destinationDir = modelDir
+        )
+        if (!extractionValidation.isValid) {
+            return extractionValidation
+        }
+
+        return validateRequiredResourcesPresent(model)
+    }
+
+    private fun clearExtractedResources(model: ModelInfo, preserveArchive: Boolean = false) {
+        val modelDir = getModelDirectory(model)
+        if (!modelDir.exists()) return
+
+        val keepNames = if (preserveArchive) {
+            setOf(model.filename, "${model.filename}.download")
+        } else {
+            emptySet()
+        }
+
+        modelDir.listFiles().orEmpty().forEach { child ->
+            if (child.name !in keepNames) {
+                runCatching { child.deleteRecursively() }
+            }
+        }
+    }
+
+    private fun extractTarBz2Archive(archiveFile: File, destinationDir: File): ValidationResult {
+        if (!destinationDir.exists() && !destinationDir.mkdirs()) {
+            return ValidationResult(false, "Unable to create model directory: ${destinationDir.absolutePath}")
+        }
+
+        val destinationCanonical = destinationDir.canonicalFile
+        val destinationPrefix = destinationCanonical.path + File.separator
+
+        return try {
+            FileInputStream(archiveFile).use { fis ->
+                BufferedInputStream(fis).use { bis ->
+                    BZip2CompressorInputStream(bis, true).use { bzipInput ->
+                        TarArchiveInputStream(bzipInput).use { tarInput ->
+                            var entry = tarInput.nextTarEntry
+                            while (entry != null) {
+                                val output = File(destinationDir, entry.name).canonicalFile
+                                val outputPath = output.path
+                                if (outputPath != destinationCanonical.path && !outputPath.startsWith(destinationPrefix)) {
+                                    return ValidationResult(false, "Archive contains invalid path outside destination: ${entry.name}")
+                                }
+
+                                when {
+                                    entry.isLink || entry.isSymbolicLink -> {
+                                        // Skip links for safety.
+                                    }
+
+                                    entry.isDirectory -> {
+                                        if (!output.exists()) {
+                                            output.mkdirs()
+                                        }
+                                    }
+
+                                    else -> {
+                                        output.parentFile?.mkdirs()
+                                        BufferedOutputStream(FileOutputStream(output)).use { out ->
+                                            tarInput.copyTo(out)
+                                            out.flush()
+                                        }
+                                    }
+                                }
+
+                                entry = tarInput.nextTarEntry
+                            }
+                        }
+                    }
+                }
+            }
+
+            ValidationResult(true)
+        } catch (e: Exception) {
+            ValidationResult(false, "Failed to extract archive ${archiveFile.name}: ${e.localizedMessage}")
+        }
+    }
+
+    private fun validateRequiredResourcesPresent(model: ModelInfo): ValidationResult {
+        if (model.requiredFiles.isEmpty()) {
+            return ValidationResult(true)
+        }
+
+        val modelDir = getModelDirectory(model)
+        if (!modelDir.exists()) {
+            return ValidationResult(false, "Model directory not found: ${modelDir.absolutePath}")
+        }
+
+        for (required in model.requiredFiles) {
+            val entry = findRequiredEntry(modelDir, required)
+            if (entry == null) {
+                return ValidationResult(false, "Missing required extracted file for ${model.name}: $required")
+            }
+        }
+
+        return ValidationResult(true)
+    }
+
+    private fun findRequiredEntry(modelDir: File, requiredName: String): File? {
+        val expectsDirectory = requiredName.trim().endsWith("/")
+        val normalized = requiredName.trim().trimEnd('/')
+        if (normalized.isBlank()) {
+            return null
+        }
+
+        val direct = File(modelDir, normalized)
+        if (expectsDirectory && direct.isDirectory) {
+            return direct
+        }
+
+        if (!expectsDirectory && direct.isFile) {
+            return direct
+        }
+
+        val leafName = normalized.substringAfterLast('/')
+        return modelDir.walkTopDown().firstOrNull { file ->
+            if (expectsDirectory) {
+                file.isDirectory && file.name == leafName
+            } else {
+                file.isFile && file.name == leafName
+            }
+        }
     }
 
     private fun verifyLlamaRuntime(
@@ -1237,6 +1529,21 @@ class ModelRepository(
 
                 val header = String(magic, Charsets.US_ASCII)
                 header == "lmgg" || header == "fmgg" || header == "tjgg"
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hasValidTarBz2Header(file: File): Boolean {
+        return try {
+            FileInputStream(file).use { input ->
+                val magic = ByteArray(3)
+                val read = input.read(magic)
+                read == 3 &&
+                    magic[0] == 'B'.code.toByte() &&
+                    magic[1] == 'Z'.code.toByte() &&
+                    magic[2] == 'h'.code.toByte()
             }
         } catch (_: Exception) {
             false
@@ -1360,7 +1667,11 @@ class ModelRepository(
         private const val SIZE_TOLERANCE_BYTES = 4L * 1024L
         private const val HTTP_RANGE_NOT_SATISFIABLE = 416
         private const val STATUS_CONNECTING = "Connecting..."
+        private const val STATUS_EXTRACTING = "Extracting archive..."
         private const val STATUS_STALLED_RETRYING = "Network stalled — retrying..."
+        private const val MODELS_DIR_LLM = "llm"
+        private const val MODELS_DIR_STT = "stt"
+        private const val MODELS_DIR_TTS = "tts"
 
         private val HTTP_SUCCESS_CODES = setOf(
             HttpURLConnection.HTTP_OK,

@@ -6,10 +6,13 @@ import java.util.Locale
 
 enum class ModelId(val rawValue: String) {
     QWEN3_1_7B("qwen3-1.7b"),
+    GEMMA3_1B("gemma3-1b"),
     QWEN3_4B("qwen3-4b"),
     PHI4_MINI("phi4-mini"),
     GEMMA3_4B("gemma3-4b"),
-    WHISPER_BASE("whisper-base");
+    WHISPER_BASE("whisper-base"),
+    MOONSHINE_TINY_EN("moonshine-tiny-en"),
+    KOKORO_EN_INT8("kokoro-en-int8");
 
     companion object {
         fun fromRaw(raw: String): ModelId =
@@ -19,7 +22,13 @@ enum class ModelId(val rawValue: String) {
 
 enum class ModelType {
     CHAT_LLM,
-    SPEECH_TO_TEXT
+    SPEECH_TO_TEXT,
+    TEXT_TO_SPEECH
+}
+
+enum class ModelPackageType {
+    SINGLE_FILE,
+    TAR_BZ2_ARCHIVE
 }
 
 enum class ModelState {
@@ -48,11 +57,14 @@ data class ModelManifestEntry(
     val capabilities: List<String>,
     val architecture: String,
     val ramRequired: String,
+    val directDownloadUrl: String? = null,
+    val packageType: ModelPackageType = ModelPackageType.SINGLE_FILE,
+    val requiredFiles: List<String> = emptyList(),
     val isDefault: Boolean = false,
     val isDownloadable: Boolean = true
 ) {
     val downloadUrl: String?
-        get() = repository?.let { ModelManifest.buildHuggingFaceResolveUrl(it, filename) }
+        get() = directDownloadUrl ?: repository?.let { ModelManifest.buildHuggingFaceResolveUrl(it, filename) }
 
     val sizeFormatted: String
         get() = ModelManifest.formatBytes(expectedSizeBytes)
@@ -77,6 +89,8 @@ data class ModelInfo(
     val architecture: String,
     val ramRequired: String = "1.5 GB",
     val isDownloadable: Boolean = true,
+    val packageType: ModelPackageType = ModelPackageType.SINGLE_FILE,
+    val requiredFiles: List<String> = emptyList(),
     val downloadSpeed: String? = null,
     val downloadedBytes: Long = 0L,
     val state: ModelState = ModelState.NOT_INSTALLED,
@@ -84,10 +98,20 @@ data class ModelInfo(
     val isLoaded: Boolean = false
 ) {
     val backend: String
-        get() = if (modelType == ModelType.SPEECH_TO_TEXT) "whisper.cpp" else "llama.cpp"
+        get() = when (modelType) {
+            ModelType.CHAT_LLM -> "llama.cpp"
+            ModelType.SPEECH_TO_TEXT -> if (isWhisper) "whisper.cpp" else "sherpa-onnx"
+            ModelType.TEXT_TO_SPEECH -> "sherpa-onnx"
+        }
 
     val isWhisper: Boolean
+        get() = architecture.equals("whisper", ignoreCase = true)
+
+    val isSpeechToText: Boolean
         get() = modelType == ModelType.SPEECH_TO_TEXT
+
+    val isTextToSpeech: Boolean
+        get() = modelType == ModelType.TEXT_TO_SPEECH
 
     val isChatModel: Boolean
         get() = modelType == ModelType.CHAT_LLM
@@ -145,6 +169,23 @@ object ModelManifest {
             architecture = "qwen3",
             ramRequired = "1.6 GB",
             isDefault = true,
+            isDownloadable = true
+        ),
+        ModelManifestEntry(
+            id = ModelId.GEMMA3_1B,
+            displayName = "Gemma 3 1B",
+            tag = "4 GB Optimized",
+            description = "Ultra-light Gemma model tuned for reliable low-memory on-device voice flows.",
+            repository = "google/gemma-3-1b-it-qat-q4_0-gguf",
+            filename = "gemma-3-1b-it-q4_0.gguf",
+            expectedSizeBytes = 1003541152L,
+            sha256Expected = null,
+            quantization = "Q4_0 (QAT)",
+            modelType = ModelType.CHAT_LLM,
+            contextLength = 32768,
+            capabilities = listOf("chat", "reasoning", "tool-calling"),
+            architecture = "gemma3",
+            ramRequired = "1.2 GB",
             isDownloadable = true
         ),
         ModelManifestEntry(
@@ -214,6 +255,59 @@ object ModelManifest {
             architecture = "whisper",
             ramRequired = "0.5 GB",
             isDownloadable = true
+        ),
+        ModelManifestEntry(
+            id = ModelId.MOONSHINE_TINY_EN,
+            displayName = "Moonshine Tiny EN",
+            tag = "Speech-to-Text (Default)",
+            description = "Fast English on-device STT via sherpa-onnx Moonshine Tiny INT8.",
+            repository = null,
+            filename = "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
+            expectedSizeBytes = 107600538L,
+            sha256Expected = "d5fe6ec4334fef36255b2a4010412cad4c007e33103fec62fb5d17cad88086f2",
+            quantization = "INT8",
+            modelType = ModelType.SPEECH_TO_TEXT,
+            contextLength = 16000,
+            capabilities = listOf("speech-to-text", "voice", "fast-commands"),
+            architecture = "moonshine",
+            ramRequired = "0.6 GB",
+            directDownloadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
+            packageType = ModelPackageType.TAR_BZ2_ARCHIVE,
+            requiredFiles = listOf(
+                "preprocess.onnx",
+                "encode.int8.onnx",
+                "uncached_decode.int8.onnx",
+                "cached_decode.int8.onnx",
+                "tokens.txt"
+            ),
+            isDefault = true,
+            isDownloadable = true
+        ),
+        ModelManifestEntry(
+            id = ModelId.KOKORO_EN_INT8,
+            displayName = "Kokoro EN INT8",
+            tag = "Text-to-Speech (Default)",
+            description = "Offline sherpa-onnx Kokoro text-to-speech with selectable voices.",
+            repository = null,
+            filename = "kokoro-int8-en-v0_19.tar.bz2",
+            expectedSizeBytes = 103248205L,
+            sha256Expected = "c9f0dd393615805b0bab050c340834d5e684e732aec91c0e860cd30e982c08bd",
+            quantization = "INT8",
+            modelType = ModelType.TEXT_TO_SPEECH,
+            contextLength = 2048,
+            capabilities = listOf("text-to-speech", "voice"),
+            architecture = "kokoro",
+            ramRequired = "0.8 GB",
+            directDownloadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-en-v0_19.tar.bz2",
+            packageType = ModelPackageType.TAR_BZ2_ARCHIVE,
+            requiredFiles = listOf(
+                "model.int8.onnx",
+                "voices.bin",
+                "tokens.txt",
+                "espeak-ng-data/"
+            ),
+            isDefault = true,
+            isDownloadable = true
         )
     )
 }
@@ -239,6 +333,8 @@ object ModelConstants {
             architecture = entry.architecture,
             ramRequired = entry.ramRequired,
             isDownloadable = entry.isDownloadable,
+            packageType = entry.packageType,
+            requiredFiles = entry.requiredFiles,
             state = ModelState.NOT_INSTALLED,
             isLoaded = false
         )

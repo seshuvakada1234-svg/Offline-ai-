@@ -2,6 +2,7 @@ package com.myai.offline.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import android.os.BatteryManager
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
@@ -16,11 +17,15 @@ import com.myai.offline.data.model.InferenceMetrics
 import com.myai.offline.data.model.ModelId
 import com.myai.offline.data.model.ModelInfo
 import com.myai.offline.data.model.ModelState
+import com.myai.offline.data.model.SpeechToTextEngine
+import com.myai.offline.data.model.TextToSpeechEngine
+import com.myai.offline.data.model.VoiceOption
 import com.myai.offline.data.model.VoiceState
 import com.myai.offline.data.repository.ModelRepository
 import com.myai.offline.llm.ILocalLLMEngine
 import com.myai.offline.llm.LocalLLMEngine
 import com.myai.offline.voice.AudioRecorder
+import com.myai.offline.voice.MoonshineEngine
 import com.myai.offline.voice.TtsManager
 import com.myai.offline.voice.WhisperEngine
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +51,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val modelRepository = ModelRepository(application)
     private val llmEngine: ILocalLLMEngine = LocalLLMEngine(application)
     private val whisperEngine = WhisperEngine(application)
+    private val moonshineEngine = MoonshineEngine(application)
     private val audioRecorder = AudioRecorder(application)
     private val actionHandler = AndroidActionHandler(application)
     private val ttsManager = TtsManager(application)
@@ -79,6 +85,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _voiceTranscript = MutableStateFlow("")
     val voiceTranscript: StateFlow<String> = _voiceTranscript.asStateFlow()
 
+    private val _selectedSttEngine = MutableStateFlow(SpeechToTextEngine.MOONSHINE_TINY)
+    val selectedSttEngine: StateFlow<SpeechToTextEngine> = _selectedSttEngine.asStateFlow()
+
+    val selectedTtsEngine: StateFlow<TextToSpeechEngine> = ttsManager.preferredEngine
+    val activeTtsEngine: StateFlow<TextToSpeechEngine> = ttsManager.activeEngine
+    val availableKokoroVoices: StateFlow<List<VoiceOption>> = ttsManager.availableVoices
+    val selectedKokoroVoiceId: StateFlow<Int> = ttsManager.selectedVoiceId
+
     val audioLevel: StateFlow<Float> = audioRecorder.audioLevel
 
     val isTtsSpeaking: StateFlow<Boolean> = ttsManager.isSpeaking
@@ -94,7 +108,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sendMutex = Mutex()
     private var messageCollectionJob: Job? = null
     private var activeGenerationJob: Job? = null
+    private var moonshineAutoInitAttempted = false
     private var whisperAutoInitAttempted = false
+    private var kokoroAutoInitAttempted = false
+    private var activeListeningSttEngine = SpeechToTextEngine.MOONSHINE_TINY
 
     init {
         viewModelScope.launch {
@@ -105,26 +122,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch(Dispatchers.IO) {
             modelRepository.models.collect { modelList ->
-                val whisperModel = modelList.firstOrNull { it.id == ModelId.WHISPER_BASE } ?: return@collect
-                val shouldAutoInit = whisperModel.state in setOf(ModelState.READY, ModelState.ACTIVE)
-                if (!shouldAutoInit) {
-                    whisperAutoInitAttempted = false
-                    return@collect
-                }
+                autoInitializeSpeechModels(modelList)
+            }
+        }
 
-                if (whisperEngine.isModelLoaded) {
-                    whisperAutoInitAttempted = true
-                    return@collect
-                }
-
-                if (!whisperAutoInitAttempted) {
-                    whisperAutoInitAttempted = true
-                    val loaded = whisperEngine.loadModel(whisperModel)
-                    if (loaded) {
-                        Log.i(TAG, "[WHISPER_AUTO_INIT] Whisper initialized automatically")
-                    } else {
-                        Log.w(TAG, "[WHISPER_AUTO_INIT] Whisper model present but initialization failed")
-                    }
+        viewModelScope.launch {
+            ttsManager.isSpeaking.collect { speaking ->
+                if (!speaking && _voiceState.value == VoiceState.SPEAKING) {
+                    _voiceState.value = VoiceState.IDLE
                 }
             }
         }
@@ -151,6 +156,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         for (id in preferredIds) {
             if (activateModelInternal(id, persistSelection = true)) {
                 return
+            }
+        }
+    }
+
+    private suspend fun autoInitializeSpeechModels(modelList: List<ModelInfo>) {
+        val readyStates = setOf(ModelState.READY, ModelState.ACTIVE)
+
+        val moonshineModel = modelList.firstOrNull { it.id == ModelId.MOONSHINE_TINY_EN }
+        val whisperModel = modelList.firstOrNull { it.id == ModelId.WHISPER_BASE }
+        val kokoroModel = modelList.firstOrNull { it.id == ModelId.KOKORO_EN_INT8 }
+
+        val moonshineReady = moonshineModel?.state in readyStates
+        if (!moonshineReady) {
+            moonshineAutoInitAttempted = false
+        } else if (!moonshineEngine.isModelLoaded && !moonshineAutoInitAttempted && moonshineModel != null) {
+            moonshineAutoInitAttempted = true
+            val loaded = moonshineEngine.loadModel(moonshineModel)
+            if (loaded) {
+                Log.i(TAG, "[MOONSHINE_AUTO_INIT] Moonshine initialized automatically")
+            } else {
+                Log.w(TAG, "[MOONSHINE_AUTO_INIT] Moonshine model present but initialization failed")
+                if (_selectedSttEngine.value == SpeechToTextEngine.MOONSHINE_TINY) {
+                    _selectedSttEngine.value = SpeechToTextEngine.WHISPER_BASE
+                }
+            }
+        }
+
+        val whisperReady = whisperModel?.state in readyStates
+        if (!whisperReady) {
+            whisperAutoInitAttempted = false
+        } else if (!whisperEngine.isModelLoaded && !whisperAutoInitAttempted && whisperModel != null) {
+            whisperAutoInitAttempted = true
+            val loaded = whisperEngine.loadModel(whisperModel)
+            if (loaded) {
+                Log.i(TAG, "[WHISPER_AUTO_INIT] Whisper initialized automatically")
+            } else {
+                Log.w(TAG, "[WHISPER_AUTO_INIT] Whisper model present but initialization failed")
+            }
+        }
+
+        val kokoroReady = kokoroModel?.state in readyStates
+        if (!kokoroReady) {
+            kokoroAutoInitAttempted = false
+        } else if (!kokoroAutoInitAttempted && kokoroModel != null) {
+            kokoroAutoInitAttempted = true
+            val loaded = ttsManager.loadKokoroModel(kokoroModel)
+            if (loaded) {
+                Log.i(TAG, "[KOKORO_AUTO_INIT] Kokoro initialized automatically")
+            } else {
+                Log.w(TAG, "[KOKORO_AUTO_INIT] Kokoro model present but initialization failed")
             }
         }
     }
@@ -269,11 +324,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 _composerText.value = ""
             }
-            generateAssistantResponse(conversationId, trimmed)
+            generateAssistantResponse(
+                conversationId = conversationId,
+                userQuery = trimmed,
+                shouldSpeakResponse = isVoice
+            )
         }
     }
 
-    private fun generateAssistantResponse(conversationId: String, userQuery: String) {
+    private fun generateAssistantResponse(
+        conversationId: String,
+        userQuery: String,
+        shouldSpeakResponse: Boolean
+    ) {
         _isGenerating.value = true
         _streamingMessage.value = ""
 
@@ -348,6 +411,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (parseResult.hasAction && parseResult.action != null && !parseResult.action.requiresConfirmation) {
                         executeAction(parseResult.action)
                     }
+
+                    if (shouldSpeakResponse) {
+                        val speakText = parseResult.cleanText.ifBlank { finalText }
+                        _voiceState.value = VoiceState.SPEAKING
+                        ttsManager.speak(speakText)
+                    }
                 }
             } catch (e: Exception) {
                 if (e !is kotlinx.coroutines.CancellationException) {
@@ -385,21 +454,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val whisperModel = modelRepository.getModel(ModelId.WHISPER_BASE)
-            if (whisperModel == null || whisperModel.state !in setOf(ModelState.READY, ModelState.ACTIVE)) {
-                _voiceTranscript.value = "Download Whisper to use voice input."
+            val preferredOrder = if (_selectedSttEngine.value == SpeechToTextEngine.MOONSHINE_TINY) {
+                listOf(SpeechToTextEngine.MOONSHINE_TINY, SpeechToTextEngine.WHISPER_BASE)
+            } else {
+                listOf(SpeechToTextEngine.WHISPER_BASE, SpeechToTextEngine.MOONSHINE_TINY)
+            }
+
+            var selectedRuntime: SpeechToTextEngine? = null
+            for (engine in preferredOrder) {
+                val ready = when (engine) {
+                    SpeechToTextEngine.MOONSHINE_TINY -> prepareMoonshineEngine()
+                    SpeechToTextEngine.WHISPER_BASE -> prepareWhisperEngine()
+                }
+                if (ready) {
+                    selectedRuntime = engine
+                    break
+                }
+            }
+
+            if (selectedRuntime == null) {
+                _voiceTranscript.value = "Install Moonshine Tiny or Whisper Base.en to use voice input."
                 _voiceState.value = VoiceState.ERROR
                 return@launch
             }
 
-            if (!whisperEngine.isModelLoaded) {
-                val loaded = whisperEngine.loadModel(whisperModel)
-                if (!loaded) {
-                    _voiceTranscript.value = "Unable to initialize Whisper model."
-                    _voiceState.value = VoiceState.ERROR
-                    return@launch
-                }
+            if (selectedRuntime != _selectedSttEngine.value) {
+                _selectedSttEngine.value = selectedRuntime
             }
+
+            activeListeningSttEngine = selectedRuntime
 
             _voiceTranscript.value = ""
             _voiceState.value = VoiceState.LISTENING
@@ -415,12 +498,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             _voiceState.value = VoiceState.TRANSCRIBING
             val pcmAudio = audioRecorder.stopRecording()
-            val transcript = whisperEngine.transcribe(pcmAudio)
+            val transcript = when (activeListeningSttEngine) {
+                SpeechToTextEngine.MOONSHINE_TINY -> moonshineEngine.transcribe(pcmAudio)
+                SpeechToTextEngine.WHISPER_BASE -> whisperEngine.transcribe(pcmAudio)
+            }
 
             _voiceTranscript.value = transcript
             if (transcript.isNotBlank()) {
-                _composerText.value = transcript
-                _voiceState.value = VoiceState.IDLE
+                val quickAction = detectFastCommand(transcript)
+                if (quickAction != null) {
+                    _voiceState.value = VoiceState.ACTION_EXECUTING
+                    val result = withContext(Dispatchers.Main) {
+                        actionHandler.execute(quickAction)
+                    }
+                    _voiceTranscript.value = result.message
+                    _voiceState.value = VoiceState.SPEAKING
+                    ttsManager.speak(result.message)
+                } else {
+                    _voiceState.value = VoiceState.THINKING
+                    sendMessage(transcript, isVoice = true)
+                }
             } else {
                 _voiceState.value = VoiceState.ERROR
                 _voiceTranscript.value = "No speech detected."
@@ -432,6 +529,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         audioRecorder.stopRecording()
         _voiceState.value = VoiceState.IDLE
         _voiceTranscript.value = ""
+    }
+
+    fun selectSpeechToTextEngine(engine: SpeechToTextEngine) {
+        _selectedSttEngine.value = engine
+    }
+
+    fun selectTextToSpeechEngine(engine: TextToSpeechEngine) {
+        ttsManager.setPreferredEngine(engine)
+    }
+
+    fun selectKokoroVoice(voiceId: Int) {
+        ttsManager.setKokoroVoice(voiceId)
+    }
+
+    private suspend fun prepareMoonshineEngine(): Boolean {
+        val moonshineModel = modelRepository.getModel(ModelId.MOONSHINE_TINY_EN)
+            ?: return false
+        if (moonshineModel.state !in setOf(ModelState.READY, ModelState.ACTIVE)) {
+            return false
+        }
+
+        if (moonshineEngine.isModelLoaded) {
+            return true
+        }
+
+        val loaded = moonshineEngine.loadModel(moonshineModel)
+        if (!loaded) {
+            Log.w(TAG, "[MOONSHINE_INIT] Unable to initialize Moonshine Tiny EN")
+        }
+        return loaded
+    }
+
+    private suspend fun prepareWhisperEngine(): Boolean {
+        val whisperModel = modelRepository.getModel(ModelId.WHISPER_BASE)
+            ?: return false
+        if (whisperModel.state !in setOf(ModelState.READY, ModelState.ACTIVE)) {
+            return false
+        }
+
+        if (whisperEngine.isModelLoaded) {
+            return true
+        }
+
+        val loaded = whisperEngine.loadModel(whisperModel)
+        if (!loaded) {
+            Log.w(TAG, "[WHISPER_INIT] Unable to initialize Whisper Base.en")
+        }
+        return loaded
+    }
+
+    private fun detectFastCommand(transcript: String): AssistantAction? {
+        val normalized = transcript.trim().lowercase()
+        if (normalized.isBlank()) return null
+
+        if (normalized.startsWith("open settings") || normalized == "settings") {
+            return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS)
+        }
+
+        if (
+            normalized.startsWith("open youtube") ||
+            normalized.startsWith("launch youtube") ||
+            normalized == "youtube"
+        ) {
+            return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE)
+        }
+
+        if (normalized.startsWith("open chrome") || normalized.startsWith("open browser")) {
+            return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_CHROME)
+        }
+
+        val youtubeSearch = Regex("^(?:search\\s+(?:on\\s+)?youtube\\s+for|youtube\\s+search\\s+for)\\s+(.+)$")
+            .find(normalized)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+        if (!youtubeSearch.isNullOrBlank()) {
+            return AssistantAction(
+                type = com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE,
+                query = youtubeSearch
+            )
+        }
+
+        val webSearch = Regex("^(?:web\\s+search\\s+for|search\\s+(?:the\\s+)?web\\s+for|google)\\s+(.+)$")
+            .find(normalized)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+        if (!webSearch.isNullOrBlank()) {
+            val encodedQuery = Uri.encode(webSearch)
+            return AssistantAction(
+                type = com.myai.offline.data.model.AssistantActionType.OPEN_URL,
+                url = "https://www.google.com/search?q=$encodedQuery"
+            )
+        }
+
+        return null
     }
 
     fun executeAction(action: AssistantAction) {
@@ -483,17 +676,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteModel(modelId: ModelId) {
         viewModelScope.launch(Dispatchers.IO) {
+            val modelInfo = modelRepository.getModel(modelId)
             if (llmEngine.currentLoadedModel?.id == modelId) {
                 llmEngine.unloadModel()
             }
             if (modelId == ModelId.WHISPER_BASE && whisperEngine.isModelLoaded) {
                 whisperEngine.unloadModel()
             }
+            if (modelId == ModelId.MOONSHINE_TINY_EN && moonshineEngine.isModelLoaded) {
+                moonshineEngine.unloadModel()
+            }
+            if (modelId == ModelId.KOKORO_EN_INT8) {
+                ttsManager.unloadKokoroModel()
+            }
 
             modelRepository.deleteModel(modelId)
             _selectedModelId.value = modelRepository.selectedModelId.value
 
-            if (modelId != ModelId.WHISPER_BASE) {
+            if (modelInfo?.isChatModel == true) {
                 activateStartupDefaultModel()
             }
         }
@@ -534,6 +734,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { llmEngine.unloadModel() }
             runCatching { whisperEngine.unloadModel() }
+            runCatching { moonshineEngine.unloadModel() }
         }
         ttsManager.shutdown()
     }

@@ -123,6 +123,8 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.commons.compress)
+    implementation(files("libs/sherpa-onnx-1.13.7.aar"))
 
     // Room Database
     implementation(libs.androidx.room.runtime)
