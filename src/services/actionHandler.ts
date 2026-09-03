@@ -135,6 +135,21 @@ export class ActionHandler {
       return { hasAction: true, action, cleanedText: text, spokenSummary };
     }
 
+    // Generic App Launch: "open <app>", "launch <app>", "start <app>"
+    const openAppMatch = text.match(/^(?:please\s+)?(?:open|launch|start|run|go\s+to)\s+(?:the\s+)?(.+?)(?:\s+app)?$/i);
+    if (openAppMatch && openAppMatch[1]) {
+      const targetApp = openAppMatch[1].trim();
+      const action: AssistantAction = {
+        id: Math.random().toString(36).substring(2, 9),
+        type: 'OPEN_APP',
+        appName: targetApp,
+        requiresConfirmation: false,
+      };
+      const spokenSummary = `Opening ${targetApp}.`;
+      logger.log('ACTION_PARSED', `Heuristic action: OPEN_APP (${targetApp})`);
+      return { hasAction: true, action, cleanedText: text, spokenSummary };
+    }
+
     return {
       hasAction: false,
       cleanedText: text,
@@ -195,6 +210,14 @@ export class ActionHandler {
           targetUrl = 'https://www.google.com';
         } else if (app.includes('maps')) {
           targetUrl = 'https://maps.google.com';
+        } else if (app.includes('whatsapp')) {
+          targetUrl = 'https://web.whatsapp.com';
+        } else if (app.includes('spotify')) {
+          targetUrl = 'https://open.spotify.com';
+        } else if (app.includes('instagram')) {
+          targetUrl = 'https://www.instagram.com';
+        } else if (app.includes('netflix')) {
+          targetUrl = 'https://www.netflix.com';
         }
 
         action.executed = true;

@@ -328,6 +328,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 _composerText.value = ""
             }
+
+            // 1. Instant App Launching & Fast Actions (< 20ms)
+            val fastAction = detectFastCommand(trimmed)
+            if (fastAction != null) {
+                _voiceState.value = VoiceState.ACTION_EXECUTING
+                val outcome = withContext(Dispatchers.Main) {
+                    actionHandler.execute(fastAction)
+                }
+                insertAssistantMessage(conversationId, outcome.message)
+                if (isVoice) {
+                    _voiceTranscript.value = outcome.message
+                    _voiceState.value = VoiceState.SPEAKING
+                    ttsManager.speak(outcome.message)
+                }
+                return@launch
+            }
+
+            // 2. Instant Greetings (< 10ms)
+            val fastGreeting = detectFastGreeting(trimmed)
+            if (fastGreeting != null) {
+                insertAssistantMessage(conversationId, fastGreeting)
+                if (isVoice) {
+                    _voiceTranscript.value = fastGreeting
+                    _voiceState.value = VoiceState.SPEAKING
+                    ttsManager.speak(fastGreeting)
+                }
+                return@launch
+            }
+
+            // 3. Ultra-Fast On-Device LLM Inference (1-2s target)
             generateAssistantResponse(
                 conversationId = conversationId,
                 userQuery = trimmed,
@@ -371,7 +401,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                val history = messageDao.getMessagesList(conversationId).map { it.role to it.content }
+                // Keep context short and relevant (last 4 messages, excluding current query) to guarantee fast inference
+                val history = messageDao.getMessagesList(conversationId)
+                    .dropLastWhile { it.role == "user" && it.content == userQuery }
+                    .takeLast(4)
+                    .map { it.role to it.content }
+
                 val prompt = llmEngine.formatPrompt(
                     modelId = _selectedModelId.value,
                     conversationHistory = history,
@@ -381,10 +416,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val streamedText = StringBuilder()
                 var metrics: InferenceMetrics? = null
 
+                // For on-device chat, 128-256 tokens generates in 1-2 seconds
+                val maxGenTokens = if (userQuery.length <= 30) 128 else 256
+
                 llmEngine.generateStreaming(
                     prompt = prompt,
                     userQuery = userQuery,
-                    maxTokens = 1024,
+                    maxTokens = maxGenTokens,
                     onMetricsCalculated = { calculated ->
                         metrics = calculated
                     }
@@ -585,39 +623,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return loaded
     }
 
+    private fun detectFastGreeting(text: String): String? {
+        val clean = text.trim().lowercase()
+            .removeSuffix("!").removeSuffix(".").removeSuffix("?").trim()
+        return when (clean) {
+            "hi", "hello", "hey", "hiya", "howdy", "good morning", "good afternoon", "good evening" -> {
+                "Hello! How can I help you today?"
+            }
+            "how are you", "how are you doing", "how's it going" -> {
+                "I am doing great! Ready to help you with anything you need."
+            }
+            "who are you", "what are you" -> {
+                "I am MyAI, your private, high-performance offline AI assistant running locally on your device."
+            }
+            else -> null
+        }
+    }
+
     private fun detectFastCommand(transcript: String): AssistantAction? {
         val normalized = transcript.trim().lowercase()
         if (normalized.isBlank()) return null
 
-        if (normalized.startsWith("open settings") || normalized == "settings") {
-            return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS)
-        }
-
-        if (
-            normalized.startsWith("open youtube") ||
-            normalized.startsWith("launch youtube") ||
-            normalized == "youtube"
-        ) {
-            return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE)
-        }
-
-        if (normalized.startsWith("open chrome") || normalized.startsWith("open browser")) {
-            return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_CHROME)
-        }
-
-        val youtubeSearch = Regex("^(?:search\\s+(?:on\\s+)?youtube\\s+for|youtube\\s+search\\s+for)\\s+(.+)$")
+        // 1. YouTube Search: "search youtube for <query>", "play <query> on youtube"
+        val youtubeSearch = Regex("^(?:search\\s+(?:on\\s+)?youtube\\s+(?:for\\s+)?|youtube\\s+search\\s+(?:for\\s+)?|play\\s+(.+?)\\s+on\\s+youtube|watch\\s+(.+?)\\s+on\\s+youtube)(.*)$", RegexOption.IGNORE_CASE)
             .find(normalized)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.trim()
-        if (!youtubeSearch.isNullOrBlank()) {
-            return AssistantAction(
-                type = com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE,
-                query = youtubeSearch
-            )
+        if (youtubeSearch != null) {
+            val q = (youtubeSearch.groupValues[1].ifBlank { youtubeSearch.groupValues[2] }.ifBlank { youtubeSearch.groupValues[3] }).trim()
+            if (q.isNotBlank()) {
+                return AssistantAction(
+                    type = com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE,
+                    query = q
+                )
+            }
         }
 
-        val webSearch = Regex("^(?:web\\s+search\\s+for|search\\s+(?:the\\s+)?web\\s+for|google)\\s+(.+)$")
+        // 2. Web Search: "search web for <query>", "google <query>"
+        val webSearch = Regex("^(?:web\\s+search\\s+for|search\\s+(?:the\\s+)?web\\s+for|google\\s+for|google)\\s+(.+)$", RegexOption.IGNORE_CASE)
             .find(normalized)
             ?.groupValues
             ?.getOrNull(1)
@@ -629,6 +670,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 url = "https://www.google.com/search?q=$encodedQuery"
             )
         }
+
+        // 3. Generic App Launch: "open <app>", "launch <app>", "start <app>", "run <app>", "go to <app>"
+        val openAppRegex = Regex("^(?:please\\s+)?(?:open|launch|start|run|go\\s+to)\\s+(?:the\\s+)?(.+?)(?:\\s+app)?$", RegexOption.IGNORE_CASE)
+        val openMatch = openAppRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        val targetApp = openMatch ?: if (normalized.startsWith("open ")) normalized.removePrefix("open ").trim() else null
+
+        if (!targetApp.isNullOrBlank()) {
+            val app = targetApp.lowercase()
+            return when {
+                app == "youtube" || app == "yt" -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE)
+                app == "chrome" || app == "browser" || app == "google chrome" || app == "internet" -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_CHROME)
+                app == "settings" || app == "phone settings" || app == "system settings" -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS)
+                else -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_APP, appName = targetApp)
+            }
+        }
+
+        // Direct app names without "open"
+        if (normalized == "youtube") return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE)
+        if (normalized == "settings") return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS)
+        if (normalized == "chrome" || normalized == "browser") return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_CHROME)
 
         return null
     }
@@ -722,7 +783,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun recommendedThreadCount(): Int {
-        return Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+        val procs = Runtime.getRuntime().availableProcessors()
+        return when {
+            procs <= 2 -> 2
+            procs <= 4 -> maxOf(2, procs - 1)
+            else -> 4 // Pin to 4 threads to run strictly on big performance cores and avoid little-core contention
+        }
     }
 
     private fun updateDeviceMetrics() {
@@ -746,7 +812,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
-        private const val DEFAULT_RUNTIME_CONTEXT = 8192
+        private const val DEFAULT_RUNTIME_CONTEXT = 2048 // 2048 context size guarantees fast 1-2s response latency on mobile
         private const val DUPLICATE_WINDOW_MS = 800L
     }
 }

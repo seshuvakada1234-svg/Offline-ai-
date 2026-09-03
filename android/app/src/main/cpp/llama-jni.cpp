@@ -444,19 +444,35 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
             break;
         }
 
+        std::string piece = token_to_piece(ctx->vocab, next_token);
+        if (piece == "<end_of_turn>" || piece == "<|im_end|>" || piece == "<|end|>" || piece == "<start_of_turn>") {
+            break;
+        }
+
         generated_tokens.push_back(next_token);
         tokens_generated++;
 
         std::string full_text;
         if (!detokenize_tokens(ctx->vocab, generated_tokens, full_text)) {
-            full_text = emitted_text + token_to_piece(ctx->vocab, next_token);
+            full_text = emitted_text + piece;
+        }
+
+        bool stop_found = false;
+        const std::string stop_markers[] = {"<end_of_turn>", "<|im_end|>", "<|end|>", "<start_of_turn>"};
+        for (const auto &stop : stop_markers) {
+            size_t pos = full_text.find(stop);
+            if (pos != std::string::npos) {
+                full_text = full_text.substr(0, pos);
+                stop_found = true;
+                break;
+            }
         }
 
         std::string delta;
         if (full_text.size() >= emitted_text.size() &&
             full_text.compare(0, emitted_text.size(), emitted_text) == 0) {
             delta = full_text.substr(emitted_text.size());
-        } else {
+        } else if (!stop_found) {
             delta = full_text;
         }
 
@@ -469,7 +485,7 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
             }
         }
 
-        if (i + 1 >= token_limit || !g_is_generating.load()) {
+        if (stop_found || i + 1 >= token_limit || !g_is_generating.load()) {
             break;
         }
 
