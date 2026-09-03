@@ -289,7 +289,7 @@ fun ModelManagerScreen(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             LinearProgressIndicator(
-                                progress = { safeProgress },
+                                progress = safeProgress,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(6.dp),
