@@ -361,9 +361,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ) {
                     val activated = activateModelInternal(selectedModel.id, persistSelection = true)
                     if (!activated) {
+                        val errorDetail = modelRepository.getModel(selectedModel.id)?.errorMessage
+                        val detailMsg = if (!errorDetail.isNullOrBlank()) ": $errorDetail" else ". Check Engine Logs for details."
                         insertAssistantMessage(
                             conversationId,
-                            "Unable to load model ${selectedModel.name}. Check Engine Logs for details."
+                            "Unable to load model ${selectedModel.name}$detailMsg"
                         )
                         return@launch
                     }

@@ -44,7 +44,7 @@ For all other queries, answer directly with clear, concise markdown."""
                     append("<|assistant|>\n")
                 }
             }
-            ModelId.GEMMA3_4B -> {
+            ModelId.GEMMA3_1B, ModelId.GEMMA3_4B -> {
                 // Gemma turn template
                 buildString {
                     append("<start_of_turn>user\n$systemPrompt\n\n")
