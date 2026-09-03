@@ -133,7 +133,7 @@ fun ModelManagerScreen(
                 }
             }
 
-            items(models) { model ->
+            items(models, key = { it.id.rawValue }) { model ->
                 val isSelected = model.id == selectedModelId
                 val isReady = model.state == ModelState.READY
                 val isActive = model.state == ModelState.ACTIVE
@@ -273,13 +273,15 @@ fun ModelManagerScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
+                                val safeProgress = model.downloadProgress.takeIf { !it.isNaN() && !it.isInfinite() }?.coerceIn(0f, 1f) ?: 0f
+                                val progressPercent = (safeProgress * 100).toInt().coerceIn(0, 100)
                                 Text(
                                     text = "$sizeText ${model.downloadSpeed?.let { "• $it" } ?: ""}",
                                     fontSize = 11.sp,
                                     color = AccentAmber
                                 )
                                 Text(
-                                    "${(model.downloadProgress * 100).toInt()}%",
+                                    "$progressPercent%",
                                     fontSize = 11.sp,
                                     color = AccentAmber,
                                     fontWeight = FontWeight.Bold
@@ -287,11 +289,10 @@ fun ModelManagerScreen(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             LinearProgressIndicator(
-                                progress = model.downloadProgress,
+                                progress = { safeProgress },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(6.dp)
-                                    .clip(RoundedCornerShape(3.dp)),
+                                    .height(6.dp),
                                 color = AccentAmber,
                                 trackColor = SurfaceDark
                             )
