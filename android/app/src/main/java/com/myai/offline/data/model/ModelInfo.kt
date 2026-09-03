@@ -117,10 +117,10 @@ data class ModelInfo(
         get() = modelType == ModelType.CHAT_LLM
 
     val downloadProgress: Float
-        get() {
-            if (sizeBytes <= 0L || downloadedBytes <= 0L) return 0f
-            val ratio = (downloadedBytes.toDouble() / sizeBytes.toDouble()).toFloat()
-            return if (ratio.isNaN() || ratio.isInfinite()) 0f else ratio.coerceIn(0f, 1f)
+        get() = if (sizeBytes > 0) {
+            (downloadedBytes.toFloat() / sizeBytes.toFloat()).coerceIn(0f, 1f)
+        } else {
+            0f
         }
 }
 

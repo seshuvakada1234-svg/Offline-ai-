@@ -110,7 +110,7 @@ fun ModelSelectorSheet(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 val chatModels = models.filter { it.isChatModel }
-                items(chatModels, key = { it.id.rawValue }) { model ->
+                items(chatModels) { model ->
                     val isSelected = model.id == selectedModelId
                     val isReady = model.state == ModelState.READY || model.state == ModelState.ACTIVE
                     val isActive = model.state == ModelState.ACTIVE
