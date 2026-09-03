@@ -70,7 +70,7 @@ class KokoroTtsEngine(private val context: Context) {
                 voices = voicesPath.absolutePath
                 tokens = tokensPath.absolutePath
                 this.dataDir = dataDir.absolutePath
-                dictDir = dataDir.absolutePath
+                dictDir = ""
                 lang = "en-us"
                 lengthScale = 1.0f
             }
@@ -87,7 +87,7 @@ class KokoroTtsEngine(private val context: Context) {
                 silenceScale = 1.0f
             }
 
-            tts = OfflineTts(context.assets, ttsConfig)
+            tts = OfflineTts(assetManager = null, config = ttsConfig)
             loadedModelDir = modelDir
             Log.i(TAG, "[KOKORO_INIT] Kokoro initialized from ${modelDir.absolutePath}")
             true

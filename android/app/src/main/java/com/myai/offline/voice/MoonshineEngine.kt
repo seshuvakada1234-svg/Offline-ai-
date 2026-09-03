@@ -71,7 +71,7 @@ class MoonshineEngine(private val context: Context) {
                 decodingMethod = "greedy_search"
             }
 
-            recognizer = OfflineRecognizer(context.assets, recognizerConfig)
+            recognizer = OfflineRecognizer(assetManager = null, config = recognizerConfig)
             loadedModelDir = modelDir
             Log.i(TAG, "[MOONSHINE_INIT] Moonshine initialized from ${modelDir.absolutePath}")
             true

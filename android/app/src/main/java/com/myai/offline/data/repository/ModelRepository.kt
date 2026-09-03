@@ -381,8 +381,11 @@ class ModelRepository(
             val partialFile = getDownloadFile(model)
             val initialUrl = model.sourceUrl ?: throw IllegalStateException("Missing download URL for ${model.name}")
 
-            if (restartFromScratch && partialFile.exists()) {
-                partialFile.delete()
+            val modelDir = getModelDirectory(model)
+            modelDir.listFiles()?.forEach { file ->
+                if (file.name.endsWith(".download") && (restartFromScratch || file.name != partialFile.name)) {
+                    runCatching { file.delete() }
+                }
             }
 
             Log.i(

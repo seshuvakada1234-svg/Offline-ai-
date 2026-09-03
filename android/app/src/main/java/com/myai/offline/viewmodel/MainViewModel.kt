@@ -161,7 +161,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun autoInitializeSpeechModels(modelList: List<ModelInfo>) {
-        val readyStates = setOf(ModelState.READY, ModelState.ACTIVE)
+        try {
+            val readyStates = setOf(ModelState.READY, ModelState.ACTIVE)
 
         val moonshineModel = modelList.firstOrNull { it.id == ModelId.MOONSHINE_TINY_EN }
         val whisperModel = modelList.firstOrNull { it.id == ModelId.WHISPER_BASE }
@@ -199,7 +200,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val kokoroReady = kokoroModel?.state in readyStates
         if (!kokoroReady) {
             kokoroAutoInitAttempted = false
-        } else if (!kokoroAutoInitAttempted && kokoroModel != null) {
+        } else if (!ttsManager.isKokoroLoaded && !kokoroAutoInitAttempted && kokoroModel != null) {
             kokoroAutoInitAttempted = true
             val loaded = ttsManager.loadKokoroModel(kokoroModel)
             if (loaded) {
@@ -208,7 +209,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.w(TAG, "[KOKORO_AUTO_INIT] Kokoro model present but initialization failed")
             }
         }
+    } catch (t: Throwable) {
+        Log.e(TAG, "[SPEECH_AUTO_INIT] Failed during speech auto-init: ${t.message}", t)
     }
+}
 
     fun updateComposerText(text: String) {
         _composerText.value = text

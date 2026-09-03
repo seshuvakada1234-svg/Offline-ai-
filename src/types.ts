@@ -1,9 +1,12 @@
 export type ModelId =
   | 'qwen3-1.7b'
+  | 'gemma3-1b'
   | 'qwen3-4b'
   | 'phi4-mini'
   | 'gemma3-4b'
-  | 'whisper-base';
+  | 'whisper-base'
+  | 'moonshine-tiny-en'
+  | 'kokoro-en-int8';
 
 export type ModelState =
   | 'NOT_INSTALLED'

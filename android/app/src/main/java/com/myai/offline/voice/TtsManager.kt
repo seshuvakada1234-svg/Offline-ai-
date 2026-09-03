@@ -62,6 +62,9 @@ class TtsManager(
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    val isKokoroLoaded: Boolean
+        get() = kokoroEngine.isModelLoaded
+
     init {
         try {
             androidTts = TextToSpeech(context.applicationContext, this)

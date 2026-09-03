@@ -17,10 +17,18 @@ class WhisperEngine(private val context: Context) {
         get() = isLoaded && activeModelHandle != 0L
 
     suspend fun loadModel(modelInfo: ModelInfo): Boolean = withContext(Dispatchers.IO) {
-        val modelFile = File(File(context.filesDir, "models/${modelInfo.id.rawValue}"), modelInfo.filename)
+        val modelFile = resolveModelFile(modelInfo)
+        if (modelFile == null || !modelFile.exists() || modelFile.length() <= 0L) {
+            activeModelHandle = 0L
+            isLoaded = false
+            loadedModelFile = null
+            Log.e(TAG, "[WHISPER_INIT] Whisper model file missing or empty for ${modelInfo.name}")
+            return@withContext false
+        }
+
         Log.i(TAG, "[WHISPER_INIT] Loading Whisper model from ${modelFile.absolutePath}")
 
-        if (NativeWhisperBridge.isAvailable() && modelFile.exists() && modelFile.length() > 0) {
+        if (NativeWhisperBridge.isAvailable()) {
             activeModelHandle = NativeWhisperBridge.nativeLoadModel(modelFile.absolutePath)
             isLoaded = (activeModelHandle != 0L)
             loadedModelFile = if (isLoaded) modelFile else null
@@ -33,9 +41,19 @@ class WhisperEngine(private val context: Context) {
             activeModelHandle = 0L
             isLoaded = false
             loadedModelFile = null
-            Log.e(TAG, "[WHISPER_INIT] Whisper native backend unavailable or model file missing")
+            Log.e(TAG, "[WHISPER_INIT] Whisper native backend unavailable")
         }
         isLoaded
+    }
+
+    private fun resolveModelFile(modelInfo: ModelInfo): File? {
+        val sttPath = File(context.filesDir, "models/stt/${modelInfo.id.rawValue}/${modelInfo.filename}")
+        if (sttPath.exists() && sttPath.length() > 0) return sttPath
+
+        val legacyPath = File(context.filesDir, "models/${modelInfo.id.rawValue}/${modelInfo.filename}")
+        if (legacyPath.exists() && legacyPath.length() > 0) return legacyPath
+
+        return null
     }
 
     suspend fun unloadModel() = withContext(Dispatchers.IO) {
