@@ -32,9 +32,8 @@ set(WHISPER_BUILD_IS_DEV OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 
-if (ANDROID AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
-    add_compile_options(-march=armv8.2-a+fp16+dotprod)
-endif()
+# Allow llama.cpp and whisper.cpp to configure architecture-specific features safely.
+# Avoid forcing -march=armv8.2-a+fp16+dotprod globally as it causes fatal SIGILL on baseline arm64-v8a CPUs.
 
 add_subdirectory(${THIRD_PARTY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
 add_subdirectory(${THIRD_PARTY_DIR}/whisper.cpp EXCLUDE_FROM_ALL)

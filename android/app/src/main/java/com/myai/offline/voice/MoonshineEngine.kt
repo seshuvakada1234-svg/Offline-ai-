@@ -75,8 +75,8 @@ class MoonshineEngine(private val context: Context) {
             loadedModelDir = modelDir
             Log.i(TAG, "[MOONSHINE_INIT] Moonshine initialized from ${modelDir.absolutePath}")
             true
-        } catch (e: Exception) {
-            Log.e(TAG, "[MOONSHINE_INIT] Failed to initialize Moonshine", e)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[MOONSHINE_INIT] Failed to initialize Moonshine: ${t.message}", t)
             unloadModel()
             false
         }

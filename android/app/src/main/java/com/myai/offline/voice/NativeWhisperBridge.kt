@@ -11,12 +11,13 @@ object NativeWhisperBridge {
             System.loadLibrary("myai_native")
             isLoaded = true
             Log.i(TAG, "Native whisper bridge loaded successfully.")
-            nativeInit()
-        } catch (e: UnsatisfiedLinkError) {
-            Log.w(TAG, "libmyai_native.so not found for whisper: ${e.message}")
-            isLoaded = false
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing whisper JNI", e)
+            try {
+                nativeInit()
+            } catch (t: Throwable) {
+                Log.w(TAG, "Native whisper initialization deferred: ${t.message}")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "libmyai_native.so not found for whisper: ${t.message}")
             isLoaded = false
         }
     }

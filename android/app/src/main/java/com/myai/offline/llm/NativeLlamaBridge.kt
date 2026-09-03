@@ -15,12 +15,13 @@ object NativeLlamaBridge {
             System.loadLibrary("myai_native")
             isNativeLibraryLoaded = true
             Log.i(TAG, "Successfully loaded libmyai_native.so")
-            nativeInit()
-        } catch (e: UnsatisfiedLinkError) {
-            Log.w(TAG, "libmyai_native.so not loaded: ${e.message}")
-            isNativeLibraryLoaded = false
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing native llama library", e)
+            try {
+                nativeInit()
+            } catch (t: Throwable) {
+                Log.w(TAG, "Native llama backend initialization deferred: ${t.message}")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "libmyai_native.so not loaded: ${t.message}")
             isNativeLibraryLoaded = false
         }
     }

@@ -63,7 +63,13 @@ class TtsManager(
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     init {
-        androidTts = TextToSpeech(context.applicationContext, this)
+        try {
+            androidTts = TextToSpeech(context.applicationContext, this)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to initialize Android TextToSpeech engine: ${t.message}", t)
+            _lastError.value = "TTS engine unavailable on device"
+            onInitComplete(false)
+        }
     }
 
     override fun onInit(status: Int) {

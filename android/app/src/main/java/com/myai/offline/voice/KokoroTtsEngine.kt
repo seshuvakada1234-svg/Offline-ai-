@@ -91,8 +91,8 @@ class KokoroTtsEngine(private val context: Context) {
             loadedModelDir = modelDir
             Log.i(TAG, "[KOKORO_INIT] Kokoro initialized from ${modelDir.absolutePath}")
             true
-        } catch (e: Exception) {
-            Log.e(TAG, "[KOKORO_INIT] Failed to initialize Kokoro", e)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[KOKORO_INIT] Failed to initialize Kokoro: ${t.message}", t)
             unloadModel()
             false
         }
