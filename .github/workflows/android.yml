@@ -30,6 +30,15 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x android/gradlew
 
+      - name: Ensure Sherpa-ONNX AAR exists
+        run: |
+          mkdir -p android/app/libs
+          if [ ! -s "android/app/libs/sherpa-onnx-1.13.7.aar" ]; then
+            echo "Downloading sherpa-onnx-1.13.7.aar..."
+            curl -L -f -o android/app/libs/sherpa-onnx-1.13.7.aar https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-1.13.7.aar
+          fi
+          ls -lh android/app/libs/
+
       - name: Clean Android build
         working-directory: android
         run: ./gradlew clean --no-daemon

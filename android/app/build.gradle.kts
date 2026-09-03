@@ -127,7 +127,25 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.commons.compress)
-    implementation(files("libs/sherpa-onnx-1.13.7.aar"))
+
+    val sherpaAar = file("libs/sherpa-onnx-1.13.7.aar")
+    if (!sherpaAar.exists() || sherpaAar.length() == 0L) {
+        sherpaAar.parentFile?.mkdirs()
+        try {
+            logger.lifecycle("Downloading missing sherpa-onnx-1.13.7.aar...")
+            java.net.URI("https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-1.13.7.aar")
+                .toURL()
+                .openStream().use { input ->
+                    sherpaAar.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            logger.lifecycle("Downloaded sherpa-onnx-1.13.7.aar successfully (${sherpaAar.length()} bytes).")
+        } catch (e: Exception) {
+            logger.warn("Could not auto-download sherpa-onnx AAR: ${e.message}")
+        }
+    }
+    implementation(files(sherpaAar))
 
     // Room Database
     implementation(libs.androidx.room.runtime)
