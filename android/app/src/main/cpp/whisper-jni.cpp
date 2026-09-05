@@ -22,6 +22,7 @@ struct WhisperModelContext {
     std::string model_path;
     whisper_context *context = nullptr;
     bool is_valid = false;
+    std::mutex ctx_mutex;
 };
 
 static std::atomic<WhisperModelContext *> g_active_whisper{nullptr};
@@ -52,12 +53,15 @@ static void release_context(WhisperModelContext *ctx) {
         g_whisper_contexts.erase(it);
     }
 
-    if (ctx->context) {
-        whisper_free(ctx->context);
-        ctx->context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ctx->ctx_mutex);
+        if (ctx->context) {
+            whisper_free(ctx->context);
+            ctx->context = nullptr;
+        }
+        ctx->is_valid = false;
     }
 
-    ctx->is_valid = false;
     delete ctx;
 }
 
@@ -208,6 +212,12 @@ Java_com_myai_offline_voice_NativeWhisperBridge_nativeTranscribe(
     auto *ctx = reinterpret_cast<WhisperModelContext *>(model_handle);
     if (!ctx || !is_registered_context(ctx) || !ctx->is_valid || !ctx->context) {
         LOGE("nativeTranscribe: invalid whisper handle");
+        return env->NewStringUTF("");
+    }
+
+    std::unique_lock<std::mutex> lock(ctx->ctx_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        LOGE("nativeTranscribe: transcription already in progress on this context");
         return env->NewStringUTF("");
     }
 
