@@ -20,7 +20,7 @@ class LocalLLMEngineTest {
         val history = listOf("user" to "Hello", "assistant" to "Hi there!")
         val userQuery = "What is an OS?"
 
-        val promptFast = PromptFormatter.format(
+        val prompt = PromptFormatter.format(
             modelId = ModelId.QWEN3_1_7B,
             systemPrompt = "You are MyAI",
             conversationHistory = history,
@@ -28,20 +28,11 @@ class LocalLLMEngineTest {
             enableThinking = false
         )
 
-        assertTrue(promptFast.contains("<|im_start|>system\nYou are MyAI<|im_end|>"))
-        assertTrue(promptFast.contains("<|im_start|>user\nHello<|im_end|>"))
-        assertTrue(promptFast.contains("<|im_start|>assistant\nHi there!<|im_end|>"))
-        assertTrue(promptFast.contains("<|im_start|>user\nWhat is an OS?<|im_end|>"))
-        assertTrue(promptFast.endsWith("<think>\n\n</think>\n\n"))
-
-        val promptThinking = PromptFormatter.format(
-            modelId = ModelId.QWEN3_1_7B,
-            systemPrompt = "You are MyAI",
-            conversationHistory = history,
-            userQuery = userQuery,
-            enableThinking = true
-        )
-        assertTrue(promptThinking.endsWith("<|im_start|>assistant\n"))
+        assertTrue(prompt.contains("<|im_start|>system\nYou are MyAI<|im_end|>"))
+        assertTrue(prompt.contains("<|im_start|>user\nHello<|im_end|>"))
+        assertTrue(prompt.contains("<|im_start|>assistant\nHi there!<|im_end|>"))
+        assertTrue(prompt.contains("<|im_start|>user\nWhat is an OS?<|im_end|>"))
+        assertTrue(prompt.endsWith("<|im_start|>assistant\n"))
     }
 
     @Test

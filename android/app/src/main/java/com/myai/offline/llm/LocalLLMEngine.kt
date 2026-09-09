@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -227,45 +228,53 @@ class LocalLLMEngine(
             val tokenChannel = Channel<String>(capacity = Channel.UNLIMITED)
             var nativeReturnCode = 0
 
-            val backgroundInferenceJob = CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    nativeReturnCode = NativeLlamaBridge.nativeGenerate(
-                        modelHandle = handle,
-                        prompt = prompt,
-                        maxTokens = maxTokens,
-                        callback = LlamaTokenCallback { token ->
-                            if (!isGenerating.get()) {
-                                return@LlamaTokenCallback false
+            coroutineScope {
+                val backgroundInferenceJob = launch(Dispatchers.IO) {
+                    try {
+                        nativeReturnCode = NativeLlamaBridge.nativeGenerate(
+                            modelHandle = handle,
+                            prompt = prompt,
+                            maxTokens = maxTokens,
+                            callback = LlamaTokenCallback { token ->
+                                if (!isGenerating.get()) {
+                                    return@LlamaTokenCallback false
+                                }
+                                tokenChannel.trySend(token)
+                                true
                             }
-                            tokenChannel.trySend(token)
-                            true
-                        }
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "Native generate execution error", e)
-                } finally {
-                    tokenChannel.close()
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Native generate execution error", e)
+                    } finally {
+                        tokenChannel.close()
+                    }
                 }
+                activeInferenceJob = backgroundInferenceJob
+
+                for (token in tokenChannel) {
+                    if (!isGenerating.get()) {
+                        NativeLlamaBridge.nativeStopGeneration()
+                        backgroundInferenceJob.cancel()
+                        break
+                    }
+                    if (tokenCount == 0) {
+                        timeToFirstToken = System.currentTimeMillis() - startTime
+                        Log.i(TAG, "[FIRST_TOKEN] TTFT: ${timeToFirstToken}ms")
+                    }
+                    tokenCount++
+                    emit(token)
+                }
+
+                backgroundInferenceJob.join()
             }
-            activeInferenceJob = backgroundInferenceJob
 
-            for (token in tokenChannel) {
-                if (!isGenerating.get()) {
-                    backgroundInferenceJob.cancel()
-                    break
-                }
-                if (tokenCount == 0) {
-                    timeToFirstToken = System.currentTimeMillis() - startTime
-                    Log.i(TAG, "[FIRST_TOKEN] TTFT: ${timeToFirstToken}ms")
-                }
-                tokenCount++
-                emit(token)
+            if (!isGenerating.get()) {
+                Log.i(TAG, "[INFERENCE_CANCELLED] Inference completed early due to stop request.")
+                return@flow
             }
 
-            backgroundInferenceJob.join()
-
-            if (tokenCount == 0 || nativeReturnCode <= 0) {
-                val error = "Native inference failed to emit tokens (returnCode=$nativeReturnCode)."
+            if (nativeReturnCode < 0) {
+                val error = "Native inference failed (returnCode=$nativeReturnCode)."
                 Log.e(TAG, "[INFERENCE_ERROR] $error")
                 throw IllegalStateException(error)
             }
@@ -292,10 +301,12 @@ class LocalLLMEngine(
 
         } catch (e: CancellationException) {
             Log.i(TAG, "[GENERATION_CANCELLED] Inference job was cancelled.")
+            NativeLlamaBridge.nativeStopGeneration()
         } catch (e: Exception) {
             Log.e(TAG, "[INFERENCE_ERROR] Error during native LLM inference", e)
             emit("\n[Inference error: ${e.localizedMessage}]")
         } finally {
+            NativeLlamaBridge.nativeStopGeneration()
             isGenerating.set(false)
             activeInferenceJob = null
         }

@@ -12,7 +12,6 @@
 
 #include "llama.h"
 #include "ggml.h"
-#include "ggml-cpu.h"
 
 #define TAG "MyAI-LlamaJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -25,9 +24,8 @@ struct LlamaModelContext {
     llama_model *model = nullptr;
     const llama_vocab *vocab = nullptr;
     llama_context *context = nullptr;
-    ggml_threadpool *threadpool = nullptr;
     bool is_valid = false;
-    std::mutex ctx_mutex;
+    std::timed_mutex ctx_mutex;
     std::atomic<bool> is_generating{false};
 };
 
@@ -73,19 +71,11 @@ static void release_context(LlamaModelContext *ctx) {
     ctx->is_generating.store(false);
 
     {
-        std::lock_guard<std::mutex> lock(ctx->ctx_mutex);
+        std::lock_guard<std::timed_mutex> lock(ctx->ctx_mutex);
 
         if (ctx->context) {
-            if (ctx->threadpool) {
-                llama_detach_threadpool(ctx->context);
-                ggml_threadpool_free(ctx->threadpool);
-                ctx->threadpool = nullptr;
-            }
             llama_free(ctx->context);
             ctx->context = nullptr;
-        } else if (ctx->threadpool) {
-            ggml_threadpool_free(ctx->threadpool);
-            ctx->threadpool = nullptr;
         }
         if (ctx->model) {
             llama_model_free(ctx->model);
@@ -344,16 +334,6 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeLoadModel(
 
     llama_set_n_threads(llama_ctx, resolved_threads, resolved_threads);
 
-    struct ggml_threadpool_params tpp = ggml_threadpool_params_default(resolved_threads);
-    tpp.poll = 0; // Prevent busy-spinning on mobile CPU cores when idle
-    ggml_threadpool *tp = ggml_threadpool_new(&tpp);
-    if (tp) {
-        llama_attach_threadpool(llama_ctx, tp, nullptr);
-        LOGI("Attached persistent ggml threadpool with %d threads (poll=0)", resolved_threads);
-    } else {
-        LOGE("Failed to allocate ggml threadpool with %d threads", resolved_threads);
-    }
-
     auto *ctx = new LlamaModelContext();
     ctx->model_path = std::string(model_path_c);
     ctx->n_threads = resolved_threads;
@@ -361,8 +341,19 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeLoadModel(
     ctx->model = model;
     ctx->vocab = vocab;
     ctx->context = llama_ctx;
-    ctx->threadpool = tp;
     ctx->is_valid = true;
+
+    llama_set_abort_callback(llama_ctx, [](void *data) -> bool {
+        auto *c = static_cast<LlamaModelContext *>(data);
+        if (!g_is_generating.load()) {
+            return true;
+        }
+        if (c && !c->is_generating.load()) {
+            return true;
+        }
+        return false;
+    }, ctx);
+
     register_context(ctx);
 
     LlamaModelContext *old_ctx = g_active_context.exchange(ctx);
@@ -454,9 +445,9 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
         return -2;
     }
 
-    std::unique_lock<std::mutex> lock(ctx->ctx_mutex, std::try_to_lock);
+    std::unique_lock<std::timed_mutex> lock(ctx->ctx_mutex, std::chrono::milliseconds(2000));
     if (!lock.owns_lock()) {
-        LOGE("nativeGenerate: model is already generating response");
+        LOGE("nativeGenerate: timed out waiting for active inference to release context");
         return -1;
     }
 

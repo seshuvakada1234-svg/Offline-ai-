@@ -297,6 +297,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val trimmed = userText.trim()
         if (trimmed.isEmpty()) return
 
+        if (_isGenerating.value) {
+            Log.w(TAG, "Cancelling active generation before starting new response")
+            stopGeneration()
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             sendMutex.withLock {
                 val existing = messageDao.getMessagesList(conversationId)

@@ -25,9 +25,7 @@ For all other queries, answer directly with clear, concise markdown."""
     ): String {
         return when (modelId) {
             ModelId.QWEN3_1_7B, ModelId.QWEN3_4B -> {
-                // Qwen ChatML template.
-                // Appending closed empty <think>\n\n</think>\n\n signals to Qwen3 to skip the reasoning phase
-                // and produce direct, fast responses on mobile devices without spending hundreds of seconds.
+                // Qwen ChatML template
                 buildString {
                     append("<|im_start|>system\n$systemPrompt<|im_end|>\n")
                     for ((role, content) in conversationHistory.takeLast(4)) {
@@ -35,9 +33,6 @@ For all other queries, answer directly with clear, concise markdown."""
                     }
                     append("<|im_start|>user\n$userQuery<|im_end|>\n")
                     append("<|im_start|>assistant\n")
-                    if (!enableThinking) {
-                        append("<think>\n\n</think>\n\n")
-                    }
                 }
             }
             ModelId.PHI4_MINI -> {
