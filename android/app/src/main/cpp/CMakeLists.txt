@@ -52,6 +52,7 @@ target_include_directories(
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${THIRD_PARTY_DIR}/llama.cpp/include
+    ${THIRD_PARTY_DIR}/llama.cpp/ggml/include
     ${THIRD_PARTY_DIR}/whisper.cpp/include
 )
 

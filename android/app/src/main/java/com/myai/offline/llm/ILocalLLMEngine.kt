@@ -16,7 +16,8 @@ interface ILocalLLMEngine {
         modelId: ModelId,
         systemPrompt: String = PromptFormatter.DEFAULT_SYSTEM_PROMPT,
         conversationHistory: List<Pair<String, String>> = emptyList(),
-        userQuery: String
+        userQuery: String,
+        enableThinking: Boolean = false
     ): String
     fun generateStreaming(
         prompt: String,

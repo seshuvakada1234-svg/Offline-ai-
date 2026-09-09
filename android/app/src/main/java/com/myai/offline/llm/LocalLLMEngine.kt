@@ -173,13 +173,15 @@ class LocalLLMEngine(
         modelId: ModelId,
         systemPrompt: String,
         conversationHistory: List<Pair<String, String>>,
-        userQuery: String
+        userQuery: String,
+        enableThinking: Boolean
     ): String {
         return PromptFormatter.format(
             modelId = modelId,
             systemPrompt = systemPrompt,
             conversationHistory = conversationHistory,
-            userQuery = userQuery
+            userQuery = userQuery,
+            enableThinking = enableThinking
         )
     }
 

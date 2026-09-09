@@ -24,6 +24,7 @@ import com.myai.offline.data.model.VoiceState
 import com.myai.offline.data.repository.ModelRepository
 import com.myai.offline.llm.ILocalLLMEngine
 import com.myai.offline.llm.LocalLLMEngine
+import com.myai.offline.utils.SimpleMathEvaluator
 import com.myai.offline.voice.AudioRecorder
 import com.myai.offline.voice.MoonshineEngine
 import com.myai.offline.voice.TtsManager
@@ -357,7 +358,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 3. Ultra-Fast On-Device LLM Inference (1-2s target)
+            // 3. Instant Math Calculation (< 1ms)
+            val fastMath = detectFastMath(trimmed)
+            if (fastMath != null) {
+                insertAssistantMessage(conversationId, fastMath)
+                if (isVoice) {
+                    _voiceTranscript.value = fastMath
+                    _voiceState.value = VoiceState.SPEAKING
+                    ttsManager.speak(fastMath)
+                }
+                return@launch
+            }
+
+            // 4. Ultra-Fast On-Device LLM Inference (1-2s target)
             generateAssistantResponse(
                 conversationId = conversationId,
                 userQuery = trimmed,
@@ -638,6 +651,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             else -> null
         }
+    }
+
+    private fun detectFastMath(text: String): String? {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return null
+
+        var expr = trimmed.lowercase()
+            .removePrefix("what is").removePrefix("what's")
+            .removePrefix("calculate").removePrefix("solve").removePrefix("compute")
+            .removeSuffix("?").removeSuffix("=").trim()
+
+        if (expr.isBlank() || !expr.any { it.isDigit() }) return null
+
+        val hasOperator = expr.contains('+') || expr.contains('-') || expr.contains('*') ||
+                          expr.contains('/') || expr.contains('x') || expr.contains('×') ||
+                          expr.contains('÷') || expr.contains('%') || expr.contains('^')
+        if (!hasOperator) return null
+
+        val cleanExpr = expr.replace("×", "*").replace("÷", "/").replace("x", "*")
+        if (!cleanExpr.all { it.isDigit() || it.isWhitespace() || it in "+-*/%^()." }) {
+            return null
+        }
+
+        val result = SimpleMathEvaluator.evaluate(cleanExpr) ?: return null
+        val formattedResult = if (result % 1.0 == 0.0 && Math.abs(result) < Long.MAX_VALUE) {
+            result.toLong().toString()
+        } else {
+            String.format(java.util.Locale.US, "%.4f", result).trimEnd('0').trimEnd('.')
+        }
+        return "$trimmed = $formattedResult"
     }
 
     private fun detectFastCommand(transcript: String): AssistantAction? {

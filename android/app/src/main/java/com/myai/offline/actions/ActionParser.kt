@@ -10,12 +10,18 @@ object ActionParser {
 
     private val JSON_BLOCK_PATTERN = Pattern.compile("```(?:json)?\\s*([\\s\\S]*?)\\s*```", Pattern.CASE_INSENSITIVE)
     private val INLINE_JSON_PATTERN = Pattern.compile("\\{\\s*\"action\"\\s*:\\s*\"[A-Z_]+\"[^}]*\\}", Pattern.CASE_INSENSITIVE)
+    private val THINK_BLOCK_PATTERN = Pattern.compile("<think>([\\s\\S]*?)</think>", Pattern.CASE_INSENSITIVE)
 
     /**
      * Parses generated LLM response tokens/text to extract structured action payloads.
      */
     fun parse(rawText: String): ActionParseResult {
         var clean = rawText.trim()
+
+        // Strip internal thinking process tags if present
+        clean = THINK_BLOCK_PATTERN.matcher(clean).replaceAll("").trim()
+        clean = clean.replace(Regex("<think>[\\s\\S]*$"), "").trim()
+
         var rawJson: String? = null
 
         // 1. Try markdown code fence

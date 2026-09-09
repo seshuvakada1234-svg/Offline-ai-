@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -10,6 +11,8 @@
 #include <vector>
 
 #include "llama.h"
+#include "ggml.h"
+#include "ggml-cpu.h"
 
 #define TAG "MyAI-LlamaJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -22,6 +25,7 @@ struct LlamaModelContext {
     llama_model *model = nullptr;
     const llama_vocab *vocab = nullptr;
     llama_context *context = nullptr;
+    ggml_threadpool *threadpool = nullptr;
     bool is_valid = false;
     std::mutex ctx_mutex;
     std::atomic<bool> is_generating{false};
@@ -72,8 +76,16 @@ static void release_context(LlamaModelContext *ctx) {
         std::lock_guard<std::mutex> lock(ctx->ctx_mutex);
 
         if (ctx->context) {
+            if (ctx->threadpool) {
+                llama_detach_threadpool(ctx->context);
+                ggml_threadpool_free(ctx->threadpool);
+                ctx->threadpool = nullptr;
+            }
             llama_free(ctx->context);
             ctx->context = nullptr;
+        } else if (ctx->threadpool) {
+            ggml_threadpool_free(ctx->threadpool);
+            ctx->threadpool = nullptr;
         }
         if (ctx->model) {
             llama_model_free(ctx->model);
@@ -332,6 +344,16 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeLoadModel(
 
     llama_set_n_threads(llama_ctx, resolved_threads, resolved_threads);
 
+    struct ggml_threadpool_params tpp = ggml_threadpool_params_default(resolved_threads);
+    tpp.poll = 0; // Prevent busy-spinning on mobile CPU cores when idle
+    ggml_threadpool *tp = ggml_threadpool_new(&tpp);
+    if (tp) {
+        llama_attach_threadpool(llama_ctx, tp, nullptr);
+        LOGI("Attached persistent ggml threadpool with %d threads (poll=0)", resolved_threads);
+    } else {
+        LOGE("Failed to allocate ggml threadpool with %d threads", resolved_threads);
+    }
+
     auto *ctx = new LlamaModelContext();
     ctx->model_path = std::string(model_path_c);
     ctx->n_threads = resolved_threads;
@@ -339,6 +361,7 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeLoadModel(
     ctx->model = model;
     ctx->vocab = vocab;
     ctx->context = llama_ctx;
+    ctx->threadpool = tp;
     ctx->is_valid = true;
     register_context(ctx);
 
@@ -459,11 +482,17 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
     std::string prompt(prompt_cstr);
     env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
 
+    const auto t_start = std::chrono::steady_clock::now();
+
     std::vector<llama_token> prompt_tokens;
     if (!tokenize_prompt(ctx->vocab, prompt, prompt_tokens)) {
         LOGE("nativeGenerate: prompt tokenization failed");
         return -6;
     }
+
+    const auto t_tokenized = std::chrono::steady_clock::now();
+    const auto tokenize_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_tokenized - t_start).count();
+    LOGI("nativeGenerate: tokenized %zu prompt tokens in %lld ms", prompt_tokens.size(), static_cast<long long>(tokenize_ms));
 
     llama_set_n_threads(ctx->context, ctx->n_threads, ctx->n_threads);
     llama_memory_t memory = llama_get_memory(ctx->context);
@@ -494,6 +523,13 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
         n_consumed += n_eval;
     }
 
+    const auto t_prompt_eval = std::chrono::steady_clock::now();
+    const auto prompt_eval_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_prompt_eval - t_tokenized).count();
+    LOGI("nativeGenerate: prompt prefill finished in %lld ms (%zu tokens, %.1f t/s)",
+         static_cast<long long>(prompt_eval_ms),
+         prompt_tokens.size(),
+         prompt_eval_ms > 0 ? (prompt_tokens.size() * 1000.0 / prompt_eval_ms) : 0.0);
+
     llama_sampler *sampler = llama_sampler_init_greedy();
     if (!sampler) {
         LOGE("nativeGenerate: failed to initialize sampler");
@@ -504,6 +540,7 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
 
     int tokens_generated = 0;
     int hard_failure = 0;
+    bool first_token_emitted = false;
     std::string accumulated_pending;
 
     for (int i = 0; i < token_limit && g_is_generating.load() && ctx->is_generating.load(); ++i) {
@@ -538,6 +575,14 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
         if (valid_len > 0) {
             std::string to_emit = accumulated_pending.substr(0, valid_len);
             accumulated_pending.erase(0, valid_len);
+
+            if (!first_token_emitted) {
+                first_token_emitted = true;
+                const auto t_first = std::chrono::steady_clock::now();
+                const auto ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_first - t_start).count();
+                LOGI("nativeGenerate: [TTFT] First token emitted in %lld ms", static_cast<long long>(ttft_ms));
+            }
+
             if (!emit_token(env, callback_obj, on_token_mid, to_emit)) {
                 g_is_generating.store(false);
                 ctx->is_generating.store(false);
@@ -569,6 +614,13 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
     llama_sampler_free(sampler);
     ctx->is_generating.store(false);
     g_is_generating.store(false);
+
+    const auto t_end = std::chrono::steady_clock::now();
+    const auto total_gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_prompt_eval).count();
+    LOGI("nativeGenerate: generated %d tokens in %lld ms (speed: %.1f t/s)",
+         tokens_generated,
+         static_cast<long long>(total_gen_ms),
+         total_gen_ms > 0 ? (tokens_generated * 1000.0 / total_gen_ms) : 0.0);
 
     if (tokens_generated == 0 && hard_failure != 0) {
         return hard_failure;

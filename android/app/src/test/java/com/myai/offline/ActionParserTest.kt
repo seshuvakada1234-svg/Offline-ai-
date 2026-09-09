@@ -122,4 +122,13 @@ class ActionParserTest {
         assertEquals(text, result.cleanText)
         assertFalse(result.isMalformed)
     }
+
+    @Test
+    fun testThinkingTagStrippedFromCleanText() {
+        val rawLlmOutput = "<think>\nThe user wants to know 5+7.\n5+7 equals 12.\n</think>\n5 + 7 = 12."
+        val result = ActionParser.parse(rawLlmOutput)
+
+        assertFalse(result.hasAction)
+        assertEquals("5 + 7 = 12.", result.cleanText)
+    }
 }
