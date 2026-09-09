@@ -466,7 +466,10 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
     }
 
     llama_set_n_threads(ctx->context, ctx->n_threads, ctx->n_threads);
-    llama_kv_cache_clear(ctx->context);
+    llama_memory_t memory = llama_get_memory(ctx->context);
+    if (memory) {
+        llama_memory_clear(memory, false);
+    }
 
     g_is_generating.store(true);
     ctx->is_generating.store(true);
@@ -474,28 +477,16 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
     const int token_limit = max_tokens > 0 ? max_tokens : 256;
     const int32_t batch_size = std::max<int32_t>(1, llama_n_batch(ctx->context));
 
-    llama_batch batch = llama_batch_init(batch_size, 0, 1);
-
     int32_t n_consumed = 0;
     while (n_consumed < static_cast<int32_t>(prompt_tokens.size())) {
         const int32_t n_eval = std::min<int32_t>(
             batch_size,
             static_cast<int32_t>(prompt_tokens.size()) - n_consumed);
 
-        batch.n_tokens = n_eval;
-        for (int32_t i = 0; i < n_eval; ++i) {
-            const int32_t idx = n_consumed + i;
-            batch.token[i] = prompt_tokens[idx];
-            batch.pos[i] = idx;
-            batch.n_seq_id[i] = 1;
-            batch.seq_id[i][0] = 0;
-            batch.logits[i] = (idx == static_cast<int32_t>(prompt_tokens.size()) - 1) ? 1 : 0;
-        }
-
+        llama_batch batch = llama_batch_get_one(prompt_tokens.data() + n_consumed, n_eval);
         const int decode_status = llama_decode(ctx->context, batch);
         if (decode_status != 0) {
             LOGE("nativeGenerate: prompt decode failed (status=%d)", decode_status);
-            llama_batch_free(batch);
             ctx->is_generating.store(false);
             g_is_generating.store(false);
             return -7;
@@ -506,7 +497,6 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
     llama_sampler *sampler = llama_sampler_init_greedy();
     if (!sampler) {
         LOGE("nativeGenerate: failed to initialize sampler");
-        llama_batch_free(batch);
         ctx->is_generating.store(false);
         g_is_generating.store(false);
         return -8;
@@ -559,14 +549,10 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
             break;
         }
 
-        batch.n_tokens = 1;
-        batch.token[0] = next_token;
-        batch.pos[0] = static_cast<llama_pos>(prompt_tokens.size() + i);
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        batch.logits[0] = 1;
+        llama_token eval_token = next_token;
+        llama_batch next_batch = llama_batch_get_one(&eval_token, 1);
 
-        const int decode_status = llama_decode(ctx->context, batch);
+        const int decode_status = llama_decode(ctx->context, next_batch);
         if (decode_status != 0) {
             LOGE("nativeGenerate: decode failed during generation (status=%d)", decode_status);
             if (tokens_generated == 0) {
@@ -581,7 +567,6 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
     }
 
     llama_sampler_free(sampler);
-    llama_batch_free(batch);
     ctx->is_generating.store(false);
     g_is_generating.store(false);
 
