@@ -111,6 +111,28 @@ android {
     }
 }
 
+val sherpaAarFile = file("libs/sherpa-onnx-1.13.7.aar")
+val downloadSherpaOnnx = tasks.register("downloadSherpaOnnx") {
+    description = "Downloads sherpa-onnx AAR if not already present"
+    outputs.file(sherpaAarFile)
+    doLast {
+        if (!sherpaAarFile.exists()) {
+            sherpaAarFile.parentFile?.mkdirs()
+            logger.lifecycle("Downloading sherpa-onnx-1.13.7.aar...")
+            val url = java.net.URI("https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-1.13.7.aar").toURL()
+            url.openStream().use { input ->
+                sherpaAarFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            logger.lifecycle("Downloaded sherpa-onnx-1.13.7.aar successfully.")
+        }
+    }
+}
+tasks.matching { it.name.startsWith("preBuild") || it.name.startsWith("compile") }.configureEach {
+    dependsOn(downloadSherpaOnnx)
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

@@ -25,6 +25,7 @@ coverage/
 *.iml
 local.properties
 
-# Generated APK/AAB
+# Generated APK/AAB and downloaded AAR libraries
 *.apk
 *.aab
+android/app/libs/*.aar

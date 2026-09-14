@@ -9,11 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 if (NOT EXISTS ${THIRD_PARTY_DIR}/llama.cpp/CMakeLists.txt)
-    message(FATAL_ERROR "Missing llama.cpp dependency at ${THIRD_PARTY_DIR}/llama.cpp")
+    message(FATAL_ERROR "Missing llama.cpp dependency at ${THIRD_PARTY_DIR}/llama.cpp. Please run: git submodule update --init --recursive")
 endif()
 
 if (NOT EXISTS ${THIRD_PARTY_DIR}/whisper.cpp/CMakeLists.txt)
-    message(FATAL_ERROR "Missing whisper.cpp dependency at ${THIRD_PARTY_DIR}/whisper.cpp")
+    message(FATAL_ERROR "Missing whisper.cpp dependency at ${THIRD_PARTY_DIR}/whisper.cpp. Please run: git submodule update --init --recursive")
 endif()
 
 # Build third-party engines as static libraries and link into libmyai_native.so.
