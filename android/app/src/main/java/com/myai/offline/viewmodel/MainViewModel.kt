@@ -425,10 +425,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .takeLast(4)
                     .map { it.role to it.content }
 
+                val thinkPos = userQuery.lastIndexOf("/think", ignoreCase = true)
+                val noThinkPos = userQuery.lastIndexOf("/no_think", ignoreCase = true)
+                val enableThinking = thinkPos >= 0 && thinkPos > noThinkPos
+
                 val prompt = llmEngine.formatPrompt(
                     modelId = _selectedModelId.value,
                     conversationHistory = history,
-                    userQuery = userQuery
+                    userQuery = userQuery,
+                    enableThinking = enableThinking
                 )
 
                 val streamedText = StringBuilder()

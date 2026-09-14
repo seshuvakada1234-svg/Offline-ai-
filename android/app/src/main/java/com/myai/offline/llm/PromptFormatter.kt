@@ -26,12 +26,13 @@ For all other queries, answer directly with clear, concise markdown."""
         return when (modelId) {
             ModelId.QWEN3_1_7B, ModelId.QWEN3_4B -> {
                 // Qwen ChatML template
+                val qwenUserQuery = applyQwenThinkingDirective(userQuery, enableThinking)
                 buildString {
                     append("<|im_start|>system\n$systemPrompt<|im_end|>\n")
                     for ((role, content) in conversationHistory.takeLast(4)) {
                         append("<|im_start|>$role\n$content<|im_end|>\n")
                     }
-                    append("<|im_start|>user\n$userQuery<|im_end|>\n")
+                    append("<|im_start|>user\n$qwenUserQuery<|im_end|>\n")
                     append("<|im_start|>assistant\n")
                 }
             }
@@ -67,5 +68,15 @@ For all other queries, answer directly with clear, concise markdown."""
                 }
             }
         }
+    }
+
+    private fun applyQwenThinkingDirective(userQuery: String, enableThinking: Boolean): String {
+        val query = userQuery.trim()
+        val thinkPos = query.lastIndexOf("/think", ignoreCase = true)
+        val noThinkPos = query.lastIndexOf("/no_think", ignoreCase = true)
+        if (thinkPos >= 0 || noThinkPos >= 0) {
+            return query
+        }
+        return if (enableThinking) "$query /think" else "$query /no_think"
     }
 }

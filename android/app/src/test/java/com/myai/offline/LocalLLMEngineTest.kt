@@ -31,8 +31,34 @@ class LocalLLMEngineTest {
         assertTrue(prompt.contains("<|im_start|>system\nYou are MyAI<|im_end|>"))
         assertTrue(prompt.contains("<|im_start|>user\nHello<|im_end|>"))
         assertTrue(prompt.contains("<|im_start|>assistant\nHi there!<|im_end|>"))
-        assertTrue(prompt.contains("<|im_start|>user\nWhat is an OS?<|im_end|>"))
+        assertTrue(prompt.contains("<|im_start|>user\nWhat is an OS? /no_think<|im_end|>"))
         assertTrue(prompt.endsWith("<|im_start|>assistant\n"))
+    }
+
+    @Test
+    fun testQwen3PromptFormattingWithThinkingEnabled() {
+        val prompt = PromptFormatter.format(
+            modelId = ModelId.QWEN3_1_7B,
+            systemPrompt = "You are MyAI",
+            conversationHistory = emptyList(),
+            userQuery = "Solve 12 * 17",
+            enableThinking = true
+        )
+
+        assertTrue(prompt.contains("<|im_start|>user\nSolve 12 * 17 /think<|im_end|>"))
+    }
+
+    @Test
+    fun testQwen3PromptFormattingKeepsExistingDirective() {
+        val prompt = PromptFormatter.format(
+            modelId = ModelId.QWEN3_1_7B,
+            conversationHistory = emptyList(),
+            userQuery = "Who are you /no_think",
+            enableThinking = true
+        )
+
+        assertTrue(prompt.contains("<|im_start|>user\nWho are you /no_think<|im_end|>"))
+        assertFalse(prompt.contains("/no_think /think"))
     }
 
     @Test

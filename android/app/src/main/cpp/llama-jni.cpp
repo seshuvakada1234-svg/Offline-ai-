@@ -166,7 +166,7 @@ static bool detokenize_tokens(
     return true;
 }
 
-static std::string token_to_piece(const llama_vocab *vocab, llama_token token) {
+static std::string token_to_piece(const llama_vocab *vocab, llama_token token, bool special = false) {
     std::vector<char> piece(64);
     int32_t n_chars = llama_token_to_piece(
         vocab,
@@ -174,7 +174,7 @@ static std::string token_to_piece(const llama_vocab *vocab, llama_token token) {
         piece.data(),
         static_cast<int32_t>(piece.size()),
         0,
-        false);
+        special);
 
     if (n_chars < 0) {
         piece.resize(static_cast<size_t>(-n_chars));
@@ -184,7 +184,7 @@ static std::string token_to_piece(const llama_vocab *vocab, llama_token token) {
             piece.data(),
             static_cast<int32_t>(piece.size()),
             0,
-            false);
+            special);
     }
 
     if (n_chars <= 0) {
@@ -236,6 +236,18 @@ static size_t valid_utf8_prefix_len(const std::string &str) {
         }
     }
     return valid_len;
+}
+
+static bool resolve_thinking_mode_from_prompt(const std::string &prompt) {
+    const size_t think_pos = prompt.rfind("/think");
+    const size_t no_think_pos = prompt.rfind("/no_think");
+    if (think_pos == std::string::npos) {
+        return false;
+    }
+    if (no_think_pos == std::string::npos) {
+        return true;
+    }
+    return think_pos > no_think_pos;
 }
 
 static bool emit_token(JNIEnv *env, jobject callback_obj, jmethodID on_token_mid, const std::string &token_text) {
@@ -521,13 +533,48 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
          prompt_tokens.size(),
          prompt_eval_ms > 0 ? (prompt_tokens.size() * 1000.0 / prompt_eval_ms) : 0.0);
 
-    llama_sampler *sampler = llama_sampler_init_greedy();
+    const bool enable_thinking = resolve_thinking_mode_from_prompt(prompt);
+    const int32_t top_k = 20;
+    const float top_p = enable_thinking ? 0.95f : 0.8f;
+    const float temperature = enable_thinking ? 0.6f : 0.7f;
+    const float presence_penalty = 1.5f;
+    const int32_t penalty_last_n = 64;
+
+    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
+    llama_sampler *sampler = llama_sampler_chain_init(sampler_params);
     if (!sampler) {
-        LOGE("nativeGenerate: failed to initialize sampler");
+        LOGE("nativeGenerate: failed to initialize sampler chain");
         ctx->is_generating.store(false);
         g_is_generating.store(false);
         return -8;
     }
+
+    auto add_sampler = [&](llama_sampler *sampler_item, const char *sampler_name) -> bool {
+        if (!sampler_item) {
+            LOGE("nativeGenerate: failed to initialize sampler component: %s", sampler_name);
+            return false;
+        }
+        llama_sampler_chain_add(sampler, sampler_item);
+        return true;
+    };
+
+    if (!add_sampler(llama_sampler_init_penalties(llama_vocab_n_tokens(ctx->vocab), penalty_last_n, 1.0f, 0.0f, presence_penalty), "penalties") ||
+        !add_sampler(llama_sampler_init_top_k(top_k), "top_k") ||
+        !add_sampler(llama_sampler_init_top_p(top_p, 1), "top_p") ||
+        !add_sampler(llama_sampler_init_temp(temperature), "temp") ||
+        !add_sampler(llama_sampler_init_dist(LLAMA_DEFAULT_SEED), "dist")) {
+        llama_sampler_free(sampler);
+        ctx->is_generating.store(false);
+        g_is_generating.store(false);
+        return -8;
+    }
+
+    LOGI("nativeGenerate: sampler configured (thinking=%s, top_k=%d, top_p=%.2f, temp=%.2f, presence_penalty=%.2f)",
+         enable_thinking ? "true" : "false",
+         top_k,
+         top_p,
+         temperature,
+         presence_penalty);
 
     int tokens_generated = 0;
     int hard_failure = 0;
@@ -542,42 +589,45 @@ Java_com_myai_offline_llm_NativeLlamaBridge_nativeGenerate(
             break;
         }
 
-        std::string piece = token_to_piece(ctx->vocab, next_token);
+        const bool is_control_token = llama_vocab_is_control(ctx->vocab, next_token);
+        std::string piece = token_to_piece(ctx->vocab, next_token, true);
         if (piece == "<end_of_turn>" || piece == "<|im_end|>" || piece == "<|end|>" || piece == "<start_of_turn>") {
             break;
         }
 
-        tokens_generated++;
-        accumulated_pending += piece;
-
-        // Check for stop tokens inside accumulated text
         bool stop_found = false;
-        const std::string stop_markers[] = {"<end_of_turn>", "<|im_end|>", "<|end|>", "<start_of_turn>"};
-        for (const auto &stop : stop_markers) {
-            size_t pos = accumulated_pending.find(stop);
-            if (pos != std::string::npos) {
-                accumulated_pending = accumulated_pending.substr(0, pos);
-                stop_found = true;
-                break;
-            }
-        }
+        if (!is_control_token) {
+            tokens_generated++;
+            accumulated_pending += piece;
 
-        const size_t valid_len = valid_utf8_prefix_len(accumulated_pending);
-        if (valid_len > 0) {
-            std::string to_emit = accumulated_pending.substr(0, valid_len);
-            accumulated_pending.erase(0, valid_len);
-
-            if (!first_token_emitted) {
-                first_token_emitted = true;
-                const auto t_first = std::chrono::steady_clock::now();
-                const auto ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_first - t_start).count();
-                LOGI("nativeGenerate: [TTFT] First token emitted in %lld ms", static_cast<long long>(ttft_ms));
+            // Check for stop tokens inside accumulated text
+            const std::string stop_markers[] = {"<end_of_turn>", "<|im_end|>", "<|end|>", "<start_of_turn>"};
+            for (const auto &stop : stop_markers) {
+                size_t pos = accumulated_pending.find(stop);
+                if (pos != std::string::npos) {
+                    accumulated_pending = accumulated_pending.substr(0, pos);
+                    stop_found = true;
+                    break;
+                }
             }
 
-            if (!emit_token(env, callback_obj, on_token_mid, to_emit)) {
-                g_is_generating.store(false);
-                ctx->is_generating.store(false);
-                break;
+            const size_t valid_len = valid_utf8_prefix_len(accumulated_pending);
+            if (valid_len > 0) {
+                std::string to_emit = accumulated_pending.substr(0, valid_len);
+                accumulated_pending.erase(0, valid_len);
+
+                if (!first_token_emitted) {
+                    first_token_emitted = true;
+                    const auto t_first = std::chrono::steady_clock::now();
+                    const auto ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_first - t_start).count();
+                    LOGI("nativeGenerate: [TTFT] First token emitted in %lld ms", static_cast<long long>(ttft_ms));
+                }
+
+                if (!emit_token(env, callback_obj, on_token_mid, to_emit)) {
+                    g_is_generating.store(false);
+                    ctx->is_generating.store(false);
+                    break;
+                }
             }
         }
 
