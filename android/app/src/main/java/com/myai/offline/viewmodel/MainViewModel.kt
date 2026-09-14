@@ -31,6 +31,7 @@ import com.myai.offline.voice.TtsManager
 import com.myai.offline.voice.WhisperEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.util.UUID
 
@@ -339,9 +341,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val fastAction = detectFastCommand(trimmed)
             if (fastAction != null) {
                 _voiceState.value = VoiceState.ACTION_EXECUTING
-                val outcome = withContext(Dispatchers.Main) {
-                    actionHandler.execute(fastAction)
-                }
+                val outcome = executeActionSafely(fastAction, source = "fast_text_command")
                 insertAssistantMessage(conversationId, outcome.message)
                 if (isVoice) {
                     _voiceTranscript.value = outcome.message
@@ -456,6 +456,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 val finalText = streamedText.toString().trim()
                 if (finalText.isNotBlank()) {
+                    Log.i(TAG, "[LLM_RAW_RESPONSE] ${previewForLog(finalText)}")
+
+                    val parseResult = ActionParser.parse(finalText)
+                    if (parseResult.isMalformed) {
+                        Log.w(
+                            TAG,
+                            "[ACTION_PARSE_MALFORMED] rawAction=${previewForLog(parseResult.rawActionBlock.orEmpty())}"
+                        )
+                    }
+
+                    val parsedAction = parseResult.action
+                    val shouldAutoExecuteAction = parsedAction != null &&
+                        parseResult.hasAction &&
+                        !parsedAction.requiresConfirmation &&
+                        shouldAutoExecuteModelAction(userQuery, parsedAction)
+
+                    if (parsedAction != null && parseResult.hasAction) {
+                        Log.i(
+                            TAG,
+                            "[ACTION_DETECTED] type=${parsedAction.type} query=${parsedAction.query} app=${parsedAction.appName} url=${parsedAction.url} autoExecute=$shouldAutoExecuteAction"
+                        )
+                    }
+
                     val metricsJson = metrics?.let {
                         JSONObject().apply {
                             put("timeToFirstTokenMs", it.timeToFirstTokenMs)
@@ -474,9 +497,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     messageDao.insertMessage(aiMessage)
 
-                    val parseResult = ActionParser.parse(finalText)
-                    if (parseResult.hasAction && parseResult.action != null && !parseResult.action.requiresConfirmation) {
-                        executeAction(parseResult.action)
+                    if (shouldAutoExecuteAction && parsedAction != null) {
+                        executeAction(parsedAction, source = "llm_response")
+                    } else if (parseResult.hasAction && parsedAction != null && !parsedAction.requiresConfirmation) {
+                        Log.i(
+                            TAG,
+                            "[ACTION_SKIPPED] Model action not executed because user query does not appear to request an Android action. userQuery=${previewForLog(userQuery)}"
+                        )
                     }
 
                     if (shouldSpeakResponse) {
@@ -575,9 +602,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val quickAction = detectFastCommand(transcript)
                 if (quickAction != null) {
                     _voiceState.value = VoiceState.ACTION_EXECUTING
-                    val result = withContext(Dispatchers.Main) {
-                        actionHandler.execute(quickAction)
-                    }
+                    val result = executeActionSafely(quickAction, source = "voice_fast_command")
                     _voiceTranscript.value = result.message
                     _voiceState.value = VoiceState.SPEAKING
                     ttsManager.speak(result.message)
@@ -747,11 +772,81 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return null
     }
 
-    fun executeAction(action: AssistantAction) {
-        viewModelScope.launch(Dispatchers.Main) {
-            val result = actionHandler.execute(action)
-            Log.i(TAG, "Action result: ${result.message}")
+    fun executeAction(action: AssistantAction, source: String = "ui_action_card") {
+        viewModelScope.launch(Dispatchers.IO) {
+            executeActionSafely(action, source)
         }
+    }
+
+    private suspend fun executeActionSafely(
+        action: AssistantAction,
+        source: String
+    ): AndroidActionHandler.ExecutionOutcome {
+        Log.i(
+            TAG,
+            "[ACTION_EXEC_START] source=$source type=${action.type} query=${action.query} app=${action.appName} url=${action.url}"
+        )
+
+        return try {
+            val outcome = withTimeout(ACTION_EXECUTION_TIMEOUT_MS) {
+                withContext(Dispatchers.Main) {
+                    actionHandler.execute(action)
+                }
+            }
+
+            if (outcome.success) {
+                Log.i(TAG, "[ACTION_EXEC_COMPLETE] source=$source type=${action.type} message=${outcome.message}")
+            } else {
+                Log.e(TAG, "[ACTION_EXEC_FAILURE] source=$source type=${action.type} message=${outcome.message}")
+            }
+            outcome
+        } catch (timeout: TimeoutCancellationException) {
+            val timeoutMsg = "Action execution timed out. Please try again."
+            Log.e(TAG, "[ACTION_EXEC_FAILURE] source=$source type=${action.type} reason=timeout", timeout)
+            AndroidActionHandler.ExecutionOutcome(success = false, message = timeoutMsg)
+        } catch (e: Exception) {
+            val failMsg = "Unable to execute command: ${e.localizedMessage ?: "unknown error"}"
+            Log.e(TAG, "[ACTION_EXEC_FAILURE] source=$source type=${action.type} reason=${e.message}", e)
+            AndroidActionHandler.ExecutionOutcome(success = false, message = failMsg)
+        }
+    }
+
+    private fun shouldAutoExecuteModelAction(userQuery: String, action: AssistantAction): Boolean {
+        if (detectFastCommand(userQuery) != null) {
+            return true
+        }
+
+        val normalized = userQuery.trim().lowercase()
+        val openIntent = Regex("\\b(open|launch|start|run|go\\s+to)\\b")
+        val searchIntent = Regex("\\b(search|find|look\\s+up|play|watch)\\b")
+
+        return when (action.type) {
+            com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE -> {
+                normalized.contains("youtube") && (openIntent.containsMatchIn(normalized) || searchIntent.containsMatchIn(normalized))
+            }
+            com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE -> {
+                normalized.contains("youtube") && searchIntent.containsMatchIn(normalized)
+            }
+            com.myai.offline.data.model.AssistantActionType.OPEN_CHROME -> {
+                normalized.contains("chrome") && openIntent.containsMatchIn(normalized)
+            }
+            com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS -> {
+                normalized.contains("settings") && openIntent.containsMatchIn(normalized)
+            }
+            com.myai.offline.data.model.AssistantActionType.OPEN_APP -> {
+                openIntent.containsMatchIn(normalized)
+            }
+            com.myai.offline.data.model.AssistantActionType.OPEN_URL -> {
+                searchIntent.containsMatchIn(normalized) || normalized.contains("http://") || normalized.contains("https://")
+            }
+            else -> false
+        }
+    }
+
+    private fun previewForLog(value: String, maxLen: Int = 400): String {
+        if (value.isBlank()) return "<blank>"
+        val singleLine = value.replace("\n", "\\n")
+        return if (singleLine.length <= maxLen) singleLine else singleLine.take(maxLen) + "..."
     }
 
     fun speakMessage(messageId: String, content: String) {
@@ -867,5 +962,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val DEFAULT_RUNTIME_CONTEXT = 2048 // 2048 context size guarantees fast 1-2s response latency on mobile
         private const val DUPLICATE_WINDOW_MS = 800L
+        private const val ACTION_EXECUTION_TIMEOUT_MS = 8_000L
     }
 }

@@ -11,6 +11,7 @@ object ActionParser {
     private val JSON_BLOCK_PATTERN = Pattern.compile("```(?:json)?\\s*([\\s\\S]*?)\\s*```", Pattern.CASE_INSENSITIVE)
     private val INLINE_JSON_PATTERN = Pattern.compile("\\{\\s*\"action\"\\s*:\\s*\"[A-Z_]+\"[^}]*\\}", Pattern.CASE_INSENSITIVE)
     private val THINK_BLOCK_PATTERN = Pattern.compile("<think>([\\s\\S]*?)</think>", Pattern.CASE_INSENSITIVE)
+    private val ACTION_KEY_PATTERN = Pattern.compile("\"action\"\\s*:", Pattern.CASE_INSENSITIVE)
 
     /**
      * Parses generated LLM response tokens/text to extract structured action payloads.
@@ -21,6 +22,7 @@ object ActionParser {
         // Strip internal thinking process tags if present
         clean = THINK_BLOCK_PATTERN.matcher(clean).replaceAll("").trim()
         clean = clean.replace(Regex("<think>[\\s\\S]*$"), "").trim()
+        val originalClean = clean
 
         var rawJson: String? = null
 
@@ -48,6 +50,16 @@ object ActionParser {
             )
         }
 
+        if (!ACTION_KEY_PATTERN.matcher(rawJson).find()) {
+            return ActionParseResult(
+                hasAction = false,
+                action = null,
+                cleanText = originalClean,
+                isMalformed = false,
+                rawActionBlock = null
+            )
+        }
+
         return try {
             val json = JSONObject(rawJson)
             val actionStr = if (json.has("action")) json.optString("action") else ""
@@ -57,7 +69,7 @@ object ActionParser {
                 ActionParseResult(
                     hasAction = false,
                     action = null,
-                    cleanText = clean,
+                    cleanText = originalClean,
                     isMalformed = true,
                     rawActionBlock = rawJson
                 )
@@ -87,7 +99,7 @@ object ActionParser {
             ActionParseResult(
                 hasAction = false,
                 action = null,
-                cleanText = clean,
+                cleanText = originalClean,
                 isMalformed = true,
                 rawActionBlock = rawJson
             )

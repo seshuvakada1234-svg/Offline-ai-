@@ -93,6 +93,23 @@ class ActionParserTest {
         assertFalse(result.hasAction)
         assertTrue(result.isMalformed)
         assertNull(result.action)
+        assertEquals(rawLlmOutput, result.cleanText)
+    }
+
+    @Test
+    fun testNonActionCodeBlockStaysAsNormalText() {
+        val rawLlmOutput = """
+            Here is a simple HTML template:
+            ```html
+            <html><body><h1>Wedding Invitation</h1></body></html>
+            ```
+        """.trimIndent()
+
+        val result = ActionParser.parse(rawLlmOutput)
+
+        assertFalse(result.hasAction)
+        assertFalse(result.isMalformed)
+        assertEquals(rawLlmOutput, result.cleanText)
     }
 
     @Test

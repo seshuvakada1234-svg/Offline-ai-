@@ -221,10 +221,10 @@ fun MessageItem(
                             )
                         }
                     } else {
-                        val displayText = if (parseResult != null) {
-                            parseResult.cleanText.ifBlank { "Executing assistant command..." }
-                        } else {
-                            message.content
+                        val displayText = when {
+                            parseResult == null -> message.content
+                            parseResult.cleanText.isNotBlank() -> parseResult.cleanText
+                            else -> message.content
                         }
 
                         // Rich Markdown Text
