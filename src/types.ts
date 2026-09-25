@@ -42,6 +42,8 @@ export interface ModelInfo {
 }
 
 export type AssistantActionType =
+  | 'OPEN_YOUTUBE'
+  | 'OPEN_CHROME'
   | 'OPEN_APP'
   | 'OPEN_URL'
   | 'SEARCH_YOUTUBE'

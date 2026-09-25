@@ -2,20 +2,36 @@ package com.myai.offline.actions
 
 import com.myai.offline.data.model.AssistantAction
 import com.myai.offline.data.model.AssistantActionType
-import java.net.URI
 
 object ActionValidator {
+
+    val SUPPORTED_TYPES = setOf(
+        AssistantActionType.OPEN_YOUTUBE,
+        AssistantActionType.SEARCH_YOUTUBE,
+        AssistantActionType.OPEN_APP,
+        AssistantActionType.OPEN_CHROME,
+        AssistantActionType.OPEN_SETTINGS
+    )
 
     sealed class ValidationResult {
         object Valid : ValidationResult()
         data class Invalid(val reason: String) : ValidationResult()
     }
 
-    /**
-     * Strictly verifies that an action produced by the model conforms to safe, permitted schemas.
-     * Prevents shell injection, unauthorized intents, invalid phone numbers, or dangerous URLs.
-     */
+    /** The same allowlist and parameter checks apply at parsing and execution boundaries. */
     fun validate(action: AssistantAction): ValidationResult {
+        if (action.type !in SUPPORTED_TYPES) {
+            return ValidationResult.Invalid("Unsupported device action: ${action.type.rawValue}")
+        }
+        if (action.url != null || action.phoneNumber != null || action.messageText != null ||
+            (action.type != AssistantActionType.OPEN_APP && action.appName != null) ||
+            (action.type != AssistantActionType.SEARCH_YOUTUBE && action.query != null)
+        ) {
+            return ValidationResult.Invalid("Unexpected parameters for ${action.type.rawValue}.")
+        }
+        if (listOfNotNull(action.appName, action.query).any { value -> value.any { it.isISOControl() } }) {
+            return ValidationResult.Invalid("Action parameters contain control characters.")
+        }
         return when (action.type) {
             AssistantActionType.OPEN_YOUTUBE -> {
                 ValidationResult.Valid
@@ -39,53 +55,17 @@ object ActionValidator {
                 ValidationResult.Valid
             }
 
-            AssistantActionType.OPEN_URL -> {
-                val url = action.url
-                if (url.isNullOrBlank()) {
-                    return ValidationResult.Invalid("URL is required for OPEN_URL action.")
-                }
-                try {
-                    val uri = URI(url)
-                    val scheme = uri.scheme?.lowercase()
-                    if (scheme != "http" && scheme != "https") {
-                        return ValidationResult.Invalid("Only HTTP and HTTPS URLs are allowed. Got '$scheme'.")
-                    }
-                    ValidationResult.Valid
-                } catch (e: Exception) {
-                    ValidationResult.Invalid("Malformed URL format: ${e.message}")
-                }
-            }
-
             AssistantActionType.OPEN_APP -> {
                 val app = action.appName
                 if (app.isNullOrBlank()) {
                     ValidationResult.Invalid("App name or package is required for OPEN_APP action.")
+                } else if (app.length > 80 || !app.matches(Regex("^[\\p{L}\\p{N}][\\p{L}\\p{N} ._-]*$"))) {
+                    ValidationResult.Invalid("Invalid application name.")
                 } else {
                     ValidationResult.Valid
                 }
             }
-
-            AssistantActionType.MAKE_CALL -> {
-                val phone = action.phoneNumber
-                if (phone.isNullOrBlank()) {
-                    ValidationResult.Invalid("Phone number is required for MAKE_CALL action.")
-                } else if (!phone.matches(Regex("^[+0-9\\-\\s()]{3,20}$"))) {
-                    ValidationResult.Invalid("Invalid phone number format.")
-                } else {
-                    ValidationResult.Valid
-                }
-            }
-
-            AssistantActionType.SEND_SMS -> {
-                val phone = action.phoneNumber
-                if (phone.isNullOrBlank()) {
-                    ValidationResult.Invalid("Recipient phone number is required for SEND_SMS.")
-                } else if (!phone.matches(Regex("^[+0-9\\-\\s()]{3,20}$"))) {
-                    ValidationResult.Invalid("Invalid phone number format.")
-                } else {
-                    ValidationResult.Valid
-                }
-            }
+            else -> ValidationResult.Invalid("Unsupported device action: ${action.type.rawValue}")
         }
     }
 }

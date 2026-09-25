@@ -220,7 +220,7 @@ export const TestSuiteModal: React.FC<TestSuiteModalProps> = ({ isOpen, onClose 
       durationMs: testResults['act-1']?.durationMs,
       error: testResults['act-1']?.error,
       run: async () => {
-        const text = '```json\n{"action": "SEARCH_YOUTUBE", "query": "Telugu songs"}\n```\nOpening Telugu songs on YouTube.';
+        const text = '```json\n{"action": "SEARCH_YOUTUBE", "query": "Telugu songs"}\n```';
         const parsed = ActionHandler.parseActionFromLLM(text);
         if (!parsed.hasAction || !parsed.action) throw new Error('Failed to parse structured JSON action');
         if (parsed.action.type !== 'SEARCH_YOUTUBE') throw new Error(`Wrong action type: ${parsed.action.type}`);
@@ -236,9 +236,9 @@ export const TestSuiteModal: React.FC<TestSuiteModalProps> = ({ isOpen, onClose 
       durationMs: testResults['act-2']?.durationMs,
       error: testResults['act-2']?.error,
       run: async () => {
-        const parsed = ActionHandler.parseActionFromLLM('Open Chrome');
-        if (!parsed.hasAction || parsed.action?.type !== 'OPEN_APP') {
-          throw new Error('Failed to parse OPEN_APP action for Chrome');
+        const action = ActionHandler.detectUserRequest('Open Chrome');
+        if (action?.type !== 'OPEN_CHROME') {
+          throw new Error('Failed to detect the explicit Chrome request');
         }
       },
     },
@@ -251,8 +251,8 @@ export const TestSuiteModal: React.FC<TestSuiteModalProps> = ({ isOpen, onClose 
       durationMs: testResults['act-3']?.durationMs,
       error: testResults['act-3']?.error,
       run: async () => {
-        const parsed = ActionHandler.parseActionFromLLM('Open Settings');
-        if (!parsed.hasAction || parsed.action?.type !== 'OPEN_SETTINGS') {
+        const action = ActionHandler.detectUserRequest('Open Settings');
+        if (action?.type !== 'OPEN_SETTINGS') {
           throw new Error('Failed to parse OPEN_SETTINGS action');
         }
       },

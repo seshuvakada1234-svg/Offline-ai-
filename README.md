@@ -7,7 +7,7 @@
 [![Inference Engine](https://img.shields.io/badge/C++17-llama.cpp_&_whisper.cpp-orange.svg)](https://github.com/ggml-org/llama.cpp)
 [![Privacy](https://img.shields.io/badge/Privacy-100%25_Offline_Local_Storage-green.svg)](#privacy--security)
 
-**MyAI** is a private, zero-latency, 100% offline AI voice and text assistant for Android. It runs quantized local language models (such as **Qwen3 1.7B** and **Phi-4 Mini**) directly on your device CPU/DSP using an optimized **llama.cpp** C++ engine, performs offline speech recognition with **Whisper.cpp**, speaks offline via **Sherpa-ONNX TTS**, and executes smart device actions (flashlight, timers, opening apps, YouTube search) without relying on any external cloud server.
+**MyAI** is an on-device AI voice and text assistant for Android. It runs quantized local language models (such as **Qwen3 1.7B** and **Phi-4 Mini**) on your device CPU using **llama.cpp**, performs speech recognition with **Whisper.cpp** or **Moonshine**, and supports **Sherpa-ONNX TTS**. Ordinary questions receive conversational responses; explicit supported device requests can open applications, settings, or YouTube searches.
 
 ---
 
@@ -16,14 +16,30 @@
 - 🧠 **100% On-Device LLM Inference**: Runs GGUF models locally with native multi-threaded CPU acceleration (ARM NEON & fp16 vector intrinsics) via `llama.cpp`.
 - 🎙️ **Offline Speech-to-Text (STT)**: Real-time, on-device audio transcription powered by `whisper.cpp` (`ggml-tiny.bin` / `ggml-base.bin`).
 - 🔊 **Offline Text-to-Speech (TTS)**: Natural neural voice output on-device powered by Sherpa-ONNX.
-- ⚡ **Instant Offline Math Evaluator**: Mathematical operations (e.g. `5899948990 + 23568909876`) evaluate in `< 1ms` using a local parser, bypassing the LLM to conserve battery.
-- 📱 **Smart Device Actions**: Natural language triggers Android system intents:
-  - Flashlight on/off
-  - Setting countdown timers and alarms
-  - Opening installed applications (YouTube, Camera, Settings, etc.)
-  - Querying device status (battery, network connectivity, storage)
+- 💬 **Conversation-First Responses**: Greetings, arithmetic, explanations, project ideas, and website/code requests use the regular Qwen chat pipeline.
+- 📱 **Explicit Device Actions**: Supported requests are `OPEN_YOUTUBE`, `SEARCH_YOUTUBE`, `OPEN_APP`, `OPEN_CHROME`, and `OPEN_SETTINGS`.
+  - Examples: “Open WhatsApp”, “Open Settings”, “Search YouTube for Python tutorials”.
+  - For an unfamiliar application name, use “Open Custom Reader app”.
+  - Model prose, Markdown, code examples, malformed JSON, and unknown actions never authorize execution.
 - 🗄️ **Local SQLite (Room) Database**: Complete chat history and model configurations persist exclusively on your phone.
 - 🛡️ **Zero Data Tracking**: No telemetry, no external API calls, and no cloud dependency.
+
+---
+
+## Response Pipeline
+
+Keyboard and voice input share `AssistantResponsePipeline`:
+
+```text
+Ordinary message → Qwen3 token stream → chat response → idle
+Explicit supported request → deterministic detector → validation → device action → result in chat → idle
+```
+
+The detector matches complete requests, including polite forms such as “Could you please open Chrome?”. Mentioning an app in an explanation, asking how to open it, or requesting website/code generation stays in conversation mode. Generated text does not change the selected route. The action parser accepts a single standalone JSON object (optionally JSON-fenced), checks the supported action and its parameters, and preserves the original text on failure.
+
+Generation has a 120-second deadline and device actions an 8-second deadline. Android also bounds the complete request, including persistence, to 150 seconds. `try/catch/finally` restores loading state on completion, errors, cancellation, and timeout; request ownership prevents a cancelled response from resetting a newer response. Stop preserves partial text. Blocking JNI work has a serialized background owner so cancelling the UI request does not wait for native cleanup or free a model still in use.
+
+Qwen3 conversational prompts retain `/no_think` by default. Markdown rendering handles incomplete streamed headings and code blocks without blocking the UI.
 
 ---
 
@@ -40,6 +56,7 @@
 │   │   │   │   └── third_party/         # Git submodules (llama.cpp & whisper.cpp)
 │   │   │   ├── java/com/myai/offline/   # Kotlin application source
 │   │   │   │   ├── actions/             # Action intent parser & system dispatcher
+│   │   │   │   ├── assistant/           # Conversation/action routing and bounded response lifecycle
 │   │   │   │   ├── data/                # Room database, DAO, entity definitions
 │   │   │   │   ├── llm/                 # Local LLM engine, prompt formatters, native bridge
 │   │   │   │   ├── ui/                  # Jetpack Compose UI (ChatScreen, VoiceSheet, Models)
@@ -97,7 +114,7 @@ chmod +x setup.sh
 
 - **Java Development Kit**: JDK 17 (Temurin or OpenJDK recommended)
 - **Android SDK**: Compile SDK 34, Min SDK 26 (Android 8.0 Oreo or higher)
-- **Android NDK**: Version 26.x or 27.x
+- **Android NDK**: Version 27.2.12479018 (pinned in Gradle)
 - **CMake**: 3.22.1+
 
 ### Build via Command Line
@@ -126,6 +143,17 @@ android/app/build/outputs/apk/debug/app-debug.apk
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### On-Device Conversation Verification
+
+Install Qwen3 1.7B using the debug app's Model Manager, then run:
+
+```bash
+cd android
+./gradlew connectedDebugAndroidTest
+```
+
+`NativeInferenceInstrumentationTest` streams real Qwen3 responses for greetings, arithmetic, explanations, and website/code prompts, verifies that the pipeline returns the streamed text unchanged, and rejects any attempted action execution. These tests require a connected Android device/emulator and skip native inference when the model is absent. JVM unit tests independently cover all supported commands, malformed action structures, generation/action errors, timeouts, cancellation, and streamed Markdown rendering.
+
 ---
 
 ## 🤖 Supported Models (GGUF)
@@ -145,6 +173,8 @@ Transfer any quantized `.gguf` file to your Android device storage (or download 
 
 To test the application UI, voice interactions, prompt formatters, and action dispatchers directly in your browser:
 
+The web showcase uses simulated responses. Real GGUF inference runs in the Android app.
+
 ```bash
 # Install dependencies
 npm install
@@ -154,6 +184,9 @@ npm run dev
 
 # Run TypeScript verification
 npm run lint
+
+# Run conversation/action routing and cancellation tests
+npm test
 
 # Build static production bundle
 npm run build

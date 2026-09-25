@@ -13,6 +13,18 @@ import java.util.UUID
 
 class ChatInterfaceTest {
 
+    @Test(timeout = 2000)
+    fun testStreamingHeadingsAndUnsupportedHeadingLevelsAlwaysAdvance() {
+        val response = "#### Wedding invitation website\n# Introduction\n##\tDetails\n###\tVenue\n```html\n<h1>Welcome</h1>\n```"
+        for (length in 1..response.length) {
+            MarkdownParser.parse(response.take(length))
+        }
+        for (text in listOf("#", "##", "###", "#### Heading", "#include <stdio.h>")) {
+            assertEquals(listOf(MarkdownBlock.Paragraph(text)), MarkdownParser.parse(text))
+        }
+        assertEquals(listOf(MarkdownBlock.Heading(2, "Details")), MarkdownParser.parse("##\tDetails"))
+    }
+
     @Test
     fun testChronologicalMessageFlow() {
         val convId = UUID.randomUUID().toString()

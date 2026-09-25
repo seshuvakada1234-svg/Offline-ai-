@@ -1,8 +1,7 @@
 import React from 'react';
-import { AppSettings, AssistantAction, Message, ModelId, ModelInfo, VoiceState } from './types';
+import { AppSettings, Message, ModelId, ModelInfo, VoiceState } from './types';
 import { modelManager } from './services/modelManager';
-import { qwen3Engine } from './services/qwen3Engine';
-import { ActionHandler } from './services/actionHandler';
+import { assistantPipeline } from './services/responsePipeline';
 import { tts } from './services/ttsService';
 import { whisperSTT } from './services/whisperSTT';
 import { logger } from './services/loggerService';
@@ -13,7 +12,6 @@ import { EngineLogsModal } from './components/EngineLogsModal';
 import { TestSuiteModal } from './components/TestSuiteModal';
 import { SettingsModal } from './components/SettingsModal';
 import { VoiceOverlay } from './components/VoiceOverlay';
-import { ActionConfirmationDialog } from './components/ActionConfirmationDialog';
 
 const CHAT_STORAGE_KEY = 'myai_offline_chat_history_v2';
 const SETTINGS_STORAGE_KEY = 'myai_offline_settings_v2';
@@ -33,7 +31,10 @@ export default function App() {
   const [messages, setMessages] = React.useState<Message[]>(() => {
     try {
       const saved = localStorage.getItem(CHAT_STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
+      const restored: Message[] = saved ? JSON.parse(saved) : [];
+      return Array.isArray(restored) ? restored.map(message => message.isStreaming ? {
+        ...message, isStreaming: false, content: message.content || 'Response interrupted. Please try again.',
+      } : message) : [];
     } catch (e) {
       return [];
     }
@@ -54,13 +55,19 @@ export default function App() {
   const [isTestsOpen, setIsTestsOpen] = React.useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
   const [isVoiceOverlayOpen, setIsVoiceOverlayOpen] = React.useState(false);
-  const [pendingAction, setPendingAction] = React.useState<AssistantAction | null>(null);
 
   // Voice Interaction state
   const [voiceState, setVoiceState] = React.useState<VoiceState>('IDLE');
   const [voiceTranscript, setVoiceTranscript] = React.useState('');
   const [voiceAssistantResponse, setVoiceAssistantResponse] = React.useState('');
   const [audioLevel, setAudioLevel] = React.useState(0);
+  const activeVoiceRequest = React.useRef<string | null>(null);
+
+  React.useEffect(() => () => {
+    assistantPipeline.stop();
+    whisperSTT.cancel();
+    tts.stop();
+  }, []);
 
   // Subscribe to Model Manager updates
   React.useEffect(() => {
@@ -87,7 +94,7 @@ export default function App() {
     } catch (e) {}
   };
 
-  // Voice Pipeline: Handle Voice Command
+  // Voice input uses the same conversation/action pipeline as keyboard input.
   const processVoiceInput = async (spokenText: string) => {
     if (!spokenText.trim()) {
       setVoiceState('IDLE');
@@ -105,8 +112,10 @@ export default function App() {
       isVoiceInput: true,
     };
 
+    const previousVoiceId = activeVoiceRequest.current;
     const assistantPlaceholderId = Math.random().toString(36).substring(2, 9);
-    const updatedMessages = [...messages, userMessage];
+    activeVoiceRequest.current = assistantPlaceholderId;
+    const updatedMessages = [...messages.map(m => m.id === previousVoiceId ? { ...m, isStreaming: false } : m), userMessage];
 
     setMessages([
       ...updatedMessages,
@@ -119,90 +128,43 @@ export default function App() {
       },
     ]);
 
-    let accumulatedText = '';
-
-    await qwen3Engine.generateResponse(updatedMessages, selectedModelId, {
-      onToken: (token, full) => {
-        accumulatedText = full;
-        setVoiceAssistantResponse(full);
-        setMessages(prev =>
-          prev.map(m => (m.id === assistantPlaceholderId ? { ...m, content: full, isStreaming: true } : m))
-        );
-      },
-      onComplete: async (fullText, metrics) => {
-        const parsed = ActionHandler.parseActionFromLLM(fullText);
-
-        setMessages(prev =>
-          prev.map(m =>
-            m.id === assistantPlaceholderId
-              ? {
-                  ...m,
-                  content: parsed.cleanedText || fullText,
-                  action: parsed.action,
-                  metrics,
-                  isStreaming: false,
-                }
-              : m
-          )
-        );
-
-        setVoiceAssistantResponse(parsed.spokenSummary || parsed.cleanedText);
-
-        // Execute action if not requiring confirmation
-        if (parsed.hasAction && parsed.action) {
-          if (parsed.action.requiresConfirmation) {
-            setVoiceState('IDLE');
-            setPendingAction(parsed.action);
-          } else {
-            setVoiceState('ACTION_EXECUTING');
-            const execResult = await ActionHandler.executeAction(parsed.action);
-            setMessages(prev =>
-              prev.map(m =>
-                m.id === assistantPlaceholderId && m.action
-                  ? {
-                      ...m,
-                      action: {
-                        ...m.action,
-                        executed: execResult.success,
-                        resultMessage: execResult.message,
-                      },
-                    }
-                  : m
-              )
-            );
-          }
-        }
-
-        // Announce with TTS
-        setVoiceState('SPEAKING');
-        const targetLang =
-          settings.language === 'auto'
-            ? spokenText.includes('తెలుగు') || fullText.includes('తెలుగు')
-              ? 'te-IN'
-              : 'en-US'
-            : settings.language;
-
-        tts.speak(parsed.spokenSummary || parsed.cleanedText, {
-          lang: targetLang,
-          rate: settings.speechRate,
-          pitch: settings.speechPitch,
-          onEnd: () => {
-            setVoiceState('IDLE');
-          },
-          onError: () => {
-            setVoiceState('IDLE');
-          },
-        });
-      },
-      onError: err => {
-        setVoiceState('ERROR');
-        setVoiceAssistantResponse(`Inference error: ${err.message}`);
-        setTimeout(() => setVoiceState('IDLE'), 3000);
-      },
-    });
+    try {
+      const response = await assistantPipeline.respond(updatedMessages, selectedModelId, {
+        onText: full => {
+          if (activeVoiceRequest.current !== assistantPlaceholderId) return;
+          setVoiceAssistantResponse(full);
+          setMessages(prev => prev.map(m => m.id === assistantPlaceholderId ? { ...m, content: full } : m));
+        },
+        onPhase: phase => {
+          if (activeVoiceRequest.current !== assistantPlaceholderId) return;
+          setVoiceState(phase === 'EXECUTING_ACTION' ? 'ACTION_EXECUTING' : phase === 'GENERATING' ? 'THINKING' : 'IDLE');
+        },
+      });
+      if (activeVoiceRequest.current !== assistantPlaceholderId) return;
+      setMessages(prev => prev.map(m => m.id === assistantPlaceholderId ? {
+        ...m, content: response.text, action: response.action, metrics: response.metrics, isStreaming: false,
+      } : m));
+      setVoiceAssistantResponse(response.text);
+      if (!response.cancelled) {
+        const lang = settings.language === 'auto' ? (/[\u0c00-\u0c7f]/.test(response.text) ? 'te-IN' : 'en-US') : settings.language;
+        tts.speak(response.text, { lang, rate: settings.speechRate, pitch: settings.speechPitch });
+      }
+    } catch (error) {
+      if (activeVoiceRequest.current === assistantPlaceholderId) {
+        setMessages(prev => prev.map(m => m.id === assistantPlaceholderId ? {
+          ...m, content: m.content || `Unable to complete the request: ${error instanceof Error ? error.message : 'unknown error'}`, isStreaming: false,
+        } : m));
+      }
+    } finally {
+      if (activeVoiceRequest.current === assistantPlaceholderId) {
+        activeVoiceRequest.current = null;
+        setVoiceState('IDLE');
+      }
+    }
   };
 
   const handleStartVoice = () => {
+    handleCancelVoice();
     setVoiceState('LISTENING');
     setVoiceTranscript('');
     setVoiceAssistantResponse('');
@@ -223,39 +185,35 @@ export default function App() {
       },
       onError: (err) => {
         logger.log('VOICE_TRANSCRIPT', `Voice capture error: ${err}`);
+        setVoiceAssistantResponse(err);
         setVoiceState('IDLE');
       },
       onStateChange: (newState) => {
         if (newState === 'LISTENING') setVoiceState('LISTENING');
         if (newState === 'TRANSCRIBING') setVoiceState('TRANSCRIBING');
-        if (newState === 'IDLE' && voiceState === 'LISTENING') setVoiceState('IDLE');
+        if (newState === 'IDLE') setVoiceState(previous => previous === 'LISTENING' || previous === 'TRANSCRIBING' ? 'IDLE' : previous);
       },
     });
   };
 
   const handleStopVoice = () => {
     whisperSTT.stopListening();
+  };
+
+  const handleCancelVoice = () => {
+    const id = activeVoiceRequest.current;
+    activeVoiceRequest.current = null;
+    whisperSTT.cancel();
+    assistantPipeline.stop();
+    tts.stop();
+    setMessages(prev => prev.map(m => m.id === id ? { ...m, isStreaming: false, content: m.content || 'Response stopped.' } : m));
     setVoiceState('IDLE');
   };
 
-  const handleActionConfirmed = async (action: AssistantAction) => {
-    setPendingAction(null);
-    const res = await ActionHandler.executeAction({ ...action, confirmed: true });
-    setMessages(prev =>
-      prev.map(m =>
-        m.action?.id === action.id
-          ? {
-              ...m,
-              action: {
-                ...m.action,
-                confirmed: true,
-                executed: res.success,
-                resultMessage: res.message,
-              },
-            }
-          : m
-      )
-    );
+  const handleSelectModel = (id: ModelId) => {
+    if (id === selectedModelId) return;
+    handleCancelVoice();
+    setSelectedModelId(id);
   };
 
   const storageStats = modelManager.getStorageStats();
@@ -266,7 +224,7 @@ export default function App() {
       <Header
         models={models}
         selectedModelId={selectedModelId}
-        onSelectModel={id => setSelectedModelId(id)}
+        onSelectModel={handleSelectModel}
         onOpenModelManager={() => setIsModelManagerOpen(true)}
         onOpenLogs={() => setIsLogsOpen(true)}
         onOpenTests={() => setIsTestsOpen(true)}
@@ -287,14 +245,13 @@ export default function App() {
           handleStartVoice();
         }}
         onOpenModelManager={() => setIsModelManagerOpen(true)}
-        onActionConfirmation={action => setPendingAction(action)}
       />
 
       {/* Voice Assistant Interactive Overlay */}
       <VoiceOverlay
         isOpen={isVoiceOverlayOpen}
         onClose={() => {
-          handleStopVoice();
+          handleCancelVoice();
           setIsVoiceOverlayOpen(false);
         }}
         voiceState={voiceState}
@@ -304,6 +261,7 @@ export default function App() {
         onStartListening={handleStartVoice}
         onStopListening={handleStopVoice}
         onSelectPrompt={prompt => {
+          whisperSTT.cancel();
           setVoiceTranscript(prompt);
           processVoiceInput(prompt);
         }}
@@ -320,7 +278,7 @@ export default function App() {
         onClose={() => setIsModelManagerOpen(false)}
         models={models}
         selectedModelId={selectedModelId}
-        onSelectModel={id => setSelectedModelId(id)}
+        onSelectModel={handleSelectModel}
       />
 
       {/* llama.cpp & Intent Logcat Modal */}
@@ -343,13 +301,6 @@ export default function App() {
         onSaveSettings={handleSaveSettings}
       />
 
-      {/* Action Confirmation Modal */}
-      <ActionConfirmationDialog
-        action={pendingAction}
-        isOpen={!!pendingAction}
-        onConfirm={handleActionConfirmed}
-        onCancel={() => setPendingAction(null)}
-      />
     </div>
   );
 }

@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
                 val messages by viewModel.messages.collectAsState()
                 val streamingMessage by viewModel.streamingMessage.collectAsState()
                 val isGenerating by viewModel.isGenerating.collectAsState()
+                val responsePhase by viewModel.responsePhase.collectAsState()
                 val composerText by viewModel.composerText.collectAsState()
                 val models by viewModel.models.collectAsState()
                 val selectedModelId by viewModel.selectedModelId.collectAsState()
@@ -99,6 +100,7 @@ class MainActivity : ComponentActivity() {
                                 messages = messages,
                                 streamingMessage = streamingMessage,
                                 isGenerating = isGenerating,
+                                responsePhase = responsePhase,
                                 composerText = composerText,
                                 models = models,
                                 selectedModelId = selectedModelId,

@@ -156,7 +156,7 @@ export const VoiceOverlay: React.FC<VoiceOverlayProps> = ({
           <div className="text-lg sm:text-xl font-bold tracking-tight text-white flex items-center justify-center gap-2">
             {isListening && <span className="text-indigo-400">Listening...</span>}
             {isTranscribing && <span className="text-amber-300">Transcribing speech with Whisper...</span>}
-            {isThinking && <span className="text-teal-300">Processing Intent with Qwen3...</span>}
+            {isThinking && <span className="text-teal-300">Generating response with Qwen3...</span>}
             {isActionExecuting && <span className="text-indigo-300">Executing Android Intent...</span>}
             {isSpeaking && <span className="text-emerald-300">Speaking Answer (Android TTS)...</span>}
             {voiceState === 'IDLE' && <span className="text-zinc-300">Tap microphone to speak</span>}

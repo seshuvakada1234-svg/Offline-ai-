@@ -9,6 +9,7 @@ plugins {
 android {
     namespace = "com.myai.offline"
     compileSdk = 34
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.myai.offline"

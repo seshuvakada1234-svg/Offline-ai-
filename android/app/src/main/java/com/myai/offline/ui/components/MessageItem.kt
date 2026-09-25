@@ -69,6 +69,7 @@ fun MessageItem(
     isSpeakingThis: Boolean,
     modelName: String = "Local model",
     isThinking: Boolean = false,
+    loadingText: String = "Generating response...",
     onSpeakClick: (String) -> Unit,
     onStopSpeakClick: () -> Unit,
     onActionConfirm: (AssistantAction) -> Unit,
@@ -76,7 +77,10 @@ fun MessageItem(
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
-    val parseResult = if (!isUser) ActionParser.parse(message.content) else null
+    // Only persisted execution metadata produces an action card. Model prose/code is chat text.
+    val parseResult = if (!isUser && message.actionType != null && message.actionDataJson != null) {
+        ActionParser.parse(message.actionDataJson)
+    } else null
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var isCopied by remember { mutableStateOf(false) }
@@ -214,18 +218,14 @@ fun MessageItem(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Thinking...",
+                                text = loadingText,
                                 fontSize = 13.sp,
                                 color = TextSecondary,
                                 fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                             )
                         }
                     } else {
-                        val displayText = when {
-                            parseResult == null -> message.content
-                            parseResult.cleanText.isNotBlank() -> parseResult.cleanText
-                            else -> message.content
-                        }
+                        val displayText = message.content
 
                         // Rich Markdown Text
                         MarkdownText(
@@ -238,7 +238,7 @@ fun MessageItem(
                         if (parseResult != null && parseResult.hasAction && parseResult.action != null) {
                             Spacer(modifier = Modifier.height(8.dp))
                             ActionCard(
-                                action = parseResult.action,
+                                action = parseResult.action.copy(executed = true),
                                 onConfirm = onActionConfirm,
                                 onCancel = onActionCancel
                             )

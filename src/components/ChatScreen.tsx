@@ -1,16 +1,13 @@
 import React from 'react';
-import { AppSettings, AssistantAction, Message, ModelId, ModelInfo, VoiceState } from '../types';
+import { AppSettings, Message, ModelId, ModelInfo } from '../types';
 import { ChatMessage } from './ChatMessage';
-import { qwen3Engine } from '../services/qwen3Engine';
-import { ActionHandler } from '../services/actionHandler';
+import { assistantPipeline, type ResponsePhase } from '../services/responsePipeline';
 import { tts } from '../services/ttsService';
 import {
   Mic,
   ArrowUp,
   Square,
-  Sparkles,
   Plus,
-  ChevronDown,
   ArrowDown,
   Bot,
 } from 'lucide-react';
@@ -23,7 +20,6 @@ interface ChatScreenProps {
   settings: AppSettings;
   onOpenVoiceOverlay: () => void;
   onOpenModelManager: () => void;
-  onActionConfirmation: (action: AssistantAction) => void;
 }
 
 export const ChatScreen: React.FC<ChatScreenProps> = ({
@@ -34,14 +30,15 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   settings,
   onOpenVoiceOverlay,
   onOpenModelManager,
-  onActionConfirmation,
 }) => {
   const [inputPrompt, setInputPrompt] = React.useState('');
   const [isGenerating, setIsGenerating] = React.useState(false);
+  const [phase, setPhase] = React.useState<ResponsePhase>('IDLE');
   const [showScrollBottom, setShowScrollBottom] = React.useState(false);
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const activeRequest = React.useRef<string | null>(null);
 
   const selectedModel = models.find(m => m.id === selectedModelId) || models[0];
 
@@ -61,36 +58,19 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   };
 
   const handleStopGeneration = () => {
-    qwen3Engine.stop();
+    assistantPipeline.stop();
+    const id = activeRequest.current;
+    activeRequest.current = null;
+    setMessages(prev => prev.map(message => message.id === id
+      ? { ...message, isStreaming: false, content: message.content || 'Response stopped.' }
+      : message));
     setIsGenerating(false);
+    setPhase('IDLE');
   };
 
   const handleSendMessage = async (textToSend?: string, isVoice = false) => {
     const text = (textToSend || inputPrompt).trim();
-    if (!text || isGenerating) return;
-
-    // Check if selected model is installed
-    if (selectedModel.state !== 'READY') {
-      const errorMsg: Message = {
-        id: Math.random().toString(36).substring(2, 9),
-        role: 'assistant',
-        content: `Unable to generate a response.\n\nModel "${selectedModel.name}" is not installed. Please download it from the Model Manager.`,
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(2, 9),
-          role: 'user',
-          content: text,
-          timestamp: Date.now(),
-          isVoiceInput: isVoice,
-        },
-        errorMsg,
-      ]);
-      setInputPrompt('');
-      return;
-    }
+    if (!text || activeRequest.current) return;
 
     const userMessage: Message = {
       id: Math.random().toString(36).substring(2, 9),
@@ -110,66 +90,41 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
     };
 
     const updatedMessages = [...messages, userMessage];
+    activeRequest.current = assistantPlaceholderId;
     setMessages([...updatedMessages, assistantMessage]);
     setInputPrompt('');
     setIsGenerating(true);
 
-    let accumulatedText = '';
-
-    await qwen3Engine.generateResponse(updatedMessages, selectedModelId, {
-      onToken: (token, fullText) => {
-        accumulatedText = fullText;
-        setMessages(prev =>
-          prev.map(m => (m.id === assistantPlaceholderId ? { ...m, content: fullText, isStreaming: true } : m))
-        );
-      },
-      onComplete: async (fullText, metrics) => {
+    try {
+      const response = await assistantPipeline.respond(updatedMessages, selectedModelId, {
+        onPhase: next => {
+          if (activeRequest.current === assistantPlaceholderId) setPhase(next);
+        },
+        onText: fullText => {
+          if (activeRequest.current !== assistantPlaceholderId) return;
+          setMessages(prev => prev.map(m => m.id === assistantPlaceholderId ? { ...m, content: fullText } : m));
+        },
+      });
+      if (activeRequest.current !== assistantPlaceholderId) return;
+      setMessages(prev => prev.map(m => m.id === assistantPlaceholderId ? {
+        ...m, content: response.text, action: response.action, metrics: response.metrics, isStreaming: false,
+      } : m));
+      if (!response.cancelled && (settings.autoSpeakResponse || isVoice)) {
+        tts.speak(response.text, { lang: settings.language === 'auto' ? 'en-US' : settings.language, rate: settings.speechRate, pitch: settings.speechPitch });
+      }
+    } catch (error) {
+      if (activeRequest.current === assistantPlaceholderId) {
+        setMessages(prev => prev.map(m => m.id === assistantPlaceholderId ? {
+          ...m, content: m.content || `Unable to complete the request: ${error instanceof Error ? error.message : 'unknown error'}`, isStreaming: false,
+        } : m));
+      }
+    } finally {
+      if (activeRequest.current === assistantPlaceholderId) {
+        activeRequest.current = null;
         setIsGenerating(false);
-
-        // Parse Action Intent from LLM Output
-        const parsed = ActionHandler.parseActionFromLLM(fullText);
-
-        setMessages(prev =>
-          prev.map(m =>
-            m.id === assistantPlaceholderId
-              ? {
-                  ...m,
-                  content: parsed.cleanedText || fullText,
-                  action: parsed.action,
-                  metrics,
-                  isStreaming: false,
-                }
-              : m
-          )
-        );
-
-        // Auto speak if enabled or voice input
-        if (settings.autoSpeakResponse || isVoice) {
-          tts.speak(parsed.cleanedText || fullText);
-        }
-
-        // Handle auto-executable actions
-        if (parsed.action && !parsed.action.requiresConfirmation) {
-          ActionHandler.executeAction(parsed.action);
-        } else if (parsed.action && parsed.action.requiresConfirmation) {
-          onActionConfirmation(parsed.action);
-        }
-      },
-      onError: error => {
-        setIsGenerating(false);
-        setMessages(prev =>
-          prev.map(m =>
-            m.id === assistantPlaceholderId
-              ? {
-                  ...m,
-                  content: `Generation failed: ${error.message || 'Unexpected error occurred'}. Please verify model files.`,
-                  isStreaming: false,
-                }
-              : m
-          )
-        );
-      },
-    });
+        setPhase('IDLE');
+      }
+    }
   };
 
   return (
@@ -213,11 +168,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
               key={message.id}
               message={message}
               activeModelName={selectedModel.name}
-              onActionUpdated={updatedAction => {
-                setMessages(prev =>
-                  prev.map(m => (m.action?.id === updatedAction.id ? { ...m, action: updatedAction } : m))
-                );
-              }}
+              loadingText={phase === 'EXECUTING_ACTION' ? 'Executing device action...' : 'Generating response...'}
             />
           ))
         )}
@@ -257,7 +208,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                 handleSendMessage();
               }
             }}
-            placeholder={isGenerating ? 'Generating response...' : 'Ask anything...'}
+            placeholder={isGenerating ? (phase === 'EXECUTING_ACTION' ? 'Executing device action...' : 'Generating response...') : 'Ask anything...'}
             disabled={isGenerating}
             className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-500 px-2 py-1.5 focus:outline-none disabled:opacity-60"
           />

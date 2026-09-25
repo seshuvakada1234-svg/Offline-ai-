@@ -1,6 +1,5 @@
 import React from 'react';
 import { AssistantAction } from '../types';
-import { ActionHandler } from '../services/actionHandler';
 import {
   Youtube,
   ExternalLink,
@@ -10,28 +9,16 @@ import {
   MessageSquare,
   CheckCircle2,
   AlertTriangle,
-  Play,
 } from 'lucide-react';
 
 interface ActionCardProps {
   action: AssistantAction;
-  onActionUpdated?: (action: AssistantAction) => void;
 }
 
-export const ActionCard: React.FC<ActionCardProps> = ({ action, onActionUpdated }) => {
-  const [isExecuting, setIsExecuting] = React.useState(false);
-
-  const handleExecute = async () => {
-    setIsExecuting(true);
-    const result = await ActionHandler.executeAction(action);
-    setIsExecuting(false);
-    if (onActionUpdated) {
-      onActionUpdated({ ...action, executed: result.success, resultMessage: result.message });
-    }
-  };
-
+export const ActionCard: React.FC<ActionCardProps> = ({ action }) => {
   const getActionIcon = () => {
     switch (action.type) {
+      case 'OPEN_YOUTUBE':
       case 'SEARCH_YOUTUBE':
         return <Youtube className="w-5 h-5 text-red-500" />;
       case 'OPEN_APP':
@@ -51,6 +38,10 @@ export const ActionCard: React.FC<ActionCardProps> = ({ action, onActionUpdated 
 
   const getActionTitle = () => {
     switch (action.type) {
+      case 'OPEN_YOUTUBE':
+        return 'Open YouTube';
+      case 'OPEN_CHROME':
+        return 'Open Chrome';
       case 'SEARCH_YOUTUBE':
         return `YouTube Search: "${action.query || 'Telugu songs'}"`;
       case 'OPEN_APP':
@@ -86,10 +77,10 @@ export const ActionCard: React.FC<ActionCardProps> = ({ action, onActionUpdated 
                 <CheckCircle2 className="w-3 h-3" />
                 Intent Dispatched
               </span>
-            ) : action.requiresConfirmation ? (
+            ) : action.resultMessage ? (
               <span className="inline-flex items-center gap-1 text-[10px] text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20 font-mono font-medium">
                 <AlertTriangle className="w-3 h-3" />
-                Requires Confirmation
+                Action failed
               </span>
             ) : null}
           </div>
@@ -101,18 +92,6 @@ export const ActionCard: React.FC<ActionCardProps> = ({ action, onActionUpdated 
         </div>
       </div>
 
-      <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
-        <button
-          type="button"
-          id={`execute-action-${action.id}`}
-          onClick={handleExecute}
-          disabled={isExecuting}
-          className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-100 font-medium border border-white/10 flex items-center gap-1.5 transition-all shadow-sm active:scale-95 text-xs cursor-pointer"
-        >
-          <ExternalLink className="w-3.5 h-3.5 text-indigo-400" />
-          {action.type === 'SEARCH_YOUTUBE' ? 'Open in YouTube' : 'Launch Intent'}
-        </button>
-      </div>
     </div>
   );
 };

@@ -10,155 +10,105 @@ export interface ActionParseResult {
 
 export class ActionHandler {
   private static ALLOWED_ACTIONS: AssistantActionType[] = [
+    'OPEN_YOUTUBE',
+    'OPEN_CHROME',
     'OPEN_APP',
-    'OPEN_URL',
     'SEARCH_YOUTUBE',
     'OPEN_SETTINGS',
-    'MAKE_CALL',
-    'SEND_SMS',
   ];
 
   public static parseActionFromLLM(text: string): ActionParseResult {
-    // Look for JSON block ```json ... ``` or raw JSON
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || text.match(/\{[\s\S]*?"action"[\s\S]*?\}/);
-    
-    if (!jsonMatch) {
-      // Direct heuristic fallback if the LLM output plain text like "Action: SEARCH_YOUTUBE ..."
-      return this.heuristicParse(text);
-    }
+    // Only one standalone structure is eligible. Prose and code examples stay intact.
+    const trimmed = text.trim();
+    const jsonMatch = trimmed.match(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i);
+    const jsonStr = jsonMatch?.[1]?.trim() ?? trimmed;
+    if (jsonStr.length > 4096 || !jsonStr.startsWith('{') || !jsonStr.endsWith('}')) return this.plainResponse(text);
 
     try {
-      const jsonStr = jsonMatch[1] || jsonMatch[0];
       const parsed = JSON.parse(jsonStr.trim());
 
-      if (parsed && typeof parsed.action === 'string') {
+      if (parsed && !Array.isArray(parsed) && typeof parsed.action === 'string' &&
+          Object.keys(parsed).every(key => ['action', 'appName', 'query'].includes(key)) &&
+          Object.values(parsed).every(value => typeof value === 'string')) {
+        const members = jsonStr.match(/"(?:[^"\\]|\\.)*"\s*:\s*"(?:[^"\\]|\\.)*"/g) || [];
+        if (members.length !== Object.keys(parsed).length) return this.plainResponse(text);
         const actionType = parsed.action.toUpperCase() as AssistantActionType;
         if (this.ALLOWED_ACTIONS.includes(actionType)) {
           const action: AssistantAction = {
             id: Math.random().toString(36).substring(2, 9),
             type: actionType,
-            appName: parsed.app || parsed.appName || (actionType === 'SEARCH_YOUTUBE' ? 'YouTube' : undefined),
-            url: parsed.url,
+            appName: parsed.appName,
             query: parsed.query,
-            phoneNumber: parsed.phoneNumber,
-            messageText: parsed.messageText,
-            requiresConfirmation: actionType === 'MAKE_CALL' || actionType === 'SEND_SMS',
+            requiresConfirmation: false,
             confirmed: false,
             executed: false,
           };
 
-          const cleanedText = text.replace(jsonMatch[0], '').trim();
-          const spokenSummary = this.generateSpokenSummary(action, cleanedText);
+          if (this.validateAction(action)) return this.plainResponse(text);
+          const spokenSummary = this.generateSpokenSummary(action, '');
 
           logger.log('ACTION_PARSED', `Structured action parsed: ${action.type}`, { action });
           return {
             hasAction: true,
             action,
-            cleanedText: cleanedText || spokenSummary,
+            cleanedText: '',
             spokenSummary,
           };
         }
       }
-    } catch (e) {
-      console.warn('Failed to parse JSON action block from LLM output', e);
+    } catch {
+      // A malformed action is still a displayable model response.
     }
 
-    return this.heuristicParse(text);
+    return this.plainResponse(text);
   }
 
-  private static heuristicParse(text: string): ActionParseResult {
-    const lower = text.toLowerCase();
-
-    // YouTube Search
-    if (lower.includes('youtube') && (lower.includes('search') || lower.includes('play') || lower.includes('songs') || lower.includes('for'))) {
-      let query = '';
-      const match = text.match(/(?:search|play|for|about)\s+(.+?)(?:on youtube|in youtube|$)/i) ||
-                    text.match(/youtube\s+(?:and\s+)?(?:search|play)\s+(.+)/i);
-      if (match) {
-        query = match[1].replace(/on youtube/i, '').replace(/in youtube/i, '').trim();
-      } else {
-        query = text.replace(/open youtube/i, '').replace(/and search/i, '').trim();
-      }
-
-      if (!query || query.toLowerCase() === 'youtube') query = 'trending music';
-
-      const action: AssistantAction = {
-        id: Math.random().toString(36).substring(2, 9),
-        type: 'SEARCH_YOUTUBE',
-        appName: 'YouTube',
-        query,
-        requiresConfirmation: false,
-        intentAction: 'android.intent.action.VIEW',
-        intentDataUri: `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
-      };
-
-      const spokenSummary = `Opening ${query} on YouTube.`;
-      logger.log('ACTION_PARSED', `Heuristic action: SEARCH_YOUTUBE ("${query}")`);
-      return { hasAction: true, action, cleanedText: text, spokenSummary };
+  public static detectUserRequest(userText: string): AssistantAction | undefined {
+    const text = userText.trim().replace(/^(?:(?:please\s+)|(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?))/i, '');
+    if (/[\r\n`]/.test(text)) return;
+    const search = text.match(/^(?:search\s+(?:on\s+)?youtube\s+for|open\s+youtube\s+and\s+search(?:\s+for)?)\s+(.+)$/i);
+    if (search) {
+      const action: AssistantAction = { id: crypto.randomUUID(), type: 'SEARCH_YOUTUBE', query: search[1].trim(), requiresConfirmation: false };
+      return this.validateAction(action) ? undefined : action;
     }
-
-    // Open YouTube specifically
-    if (lower === 'open youtube' || lower === 'launch youtube' || lower.startsWith('open youtube')) {
-      const action: AssistantAction = {
-        id: Math.random().toString(36).substring(2, 9),
-        type: 'OPEN_APP',
-        appName: 'YouTube',
-        requiresConfirmation: false,
-        intentAction: 'android.intent.action.MAIN',
-        intentDataUri: 'vnd.youtube://',
-      };
-      const spokenSummary = 'Opening YouTube.';
-      logger.log('ACTION_PARSED', 'Heuristic action: OPEN_APP (YouTube)');
-      return { hasAction: true, action, cleanedText: text, spokenSummary };
-    }
-
-    // Open Chrome
-    if (lower.includes('open chrome') || lower.includes('launch chrome')) {
-      const action: AssistantAction = {
-        id: Math.random().toString(36).substring(2, 9),
-        type: 'OPEN_APP',
-        appName: 'Google Chrome',
-        requiresConfirmation: false,
-      };
-      const spokenSummary = 'Opening Google Chrome.';
-      return { hasAction: true, action, cleanedText: text, spokenSummary };
-    }
-
-    // Open Settings
-    if (lower.includes('open settings') || lower.includes('device settings') || lower.includes('launch settings')) {
-      const action: AssistantAction = {
-        id: Math.random().toString(36).substring(2, 9),
-        type: 'OPEN_SETTINGS',
-        requiresConfirmation: false,
-      };
-      const spokenSummary = 'Opening device Settings.';
-      return { hasAction: true, action, cleanedText: text, spokenSummary };
-    }
-
-    // Generic App Launch: "open <app>", "launch <app>", "start <app>"
-    const openAppMatch = text.match(/^(?:please\s+)?(?:open|launch|start|run|go\s+to)\s+(?:the\s+)?(.+?)(?:\s+app)?$/i);
-    if (openAppMatch && openAppMatch[1]) {
-      const targetApp = openAppMatch[1].trim();
-      const action: AssistantAction = {
-        id: Math.random().toString(36).substring(2, 9),
-        type: 'OPEN_APP',
-        appName: targetApp,
-        requiresConfirmation: false,
-      };
-      const spokenSummary = `Opening ${targetApp}.`;
-      logger.log('ACTION_PARSED', `Heuristic action: OPEN_APP (${targetApp})`);
-      return { hasAction: true, action, cleanedText: text, spokenSummary };
-    }
-
-    return {
-      hasAction: false,
-      cleanedText: text,
-      spokenSummary: text,
+    const target = text.match(/^(?:open|launch)\s+(?:the\s+)?(.+?)(?:\s+app)?(?:\s+for\s+me)?[.!?]?$/i)?.[1]?.trim();
+    if (!target || !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,79}$/u.test(target) || target.split(/\s+/).length > 4 ||
+        /\b(and|then|with|using|how|why|what|a|an|my|website|webpage|url|file|folder|code|project|terminal|command)\b/i.test(target)) return;
+    const aliases: Record<string, AssistantActionType> = {
+      youtube: 'OPEN_YOUTUBE', yt: 'OPEN_YOUTUBE', chrome: 'OPEN_CHROME', 'google chrome': 'OPEN_CHROME', browser: 'OPEN_CHROME',
+      settings: 'OPEN_SETTINGS', 'android settings': 'OPEN_SETTINGS', 'phone settings': 'OPEN_SETTINGS', 'system settings': 'OPEN_SETTINGS',
     };
+    const normalized = target.toLowerCase();
+    const type = Object.hasOwn(aliases, normalized) ? aliases[normalized] : 'OPEN_APP';
+    const commonApps = new Set(['whatsapp', 'instagram', 'facebook', 'telegram', 'snapchat', 'spotify', 'netflix',
+      'discord', 'slack', 'gmail', 'email', 'maps', 'google maps', 'camera', 'photos', 'gallery', 'clock', 'calendar',
+      'contacts', 'phone', 'messages', 'calculator', 'play store', 'google play', 'files', 'drive', 'google drive', 'twitter', 'tiktok']);
+    if (type === 'OPEN_APP' && !commonApps.has(target.toLowerCase()) &&
+        !/\s+app(?:\s+for\s+me)?[.!?]?$/i.test(text) && !/^(?:com|org|net)\.[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+$/.test(target)) return;
+    return { id: crypto.randomUUID(), type, appName: type === 'OPEN_APP' ? target : undefined, requiresConfirmation: false };
+  }
+
+  public static validateAction(action: AssistantAction): string | null {
+    if (!action || !this.ALLOWED_ACTIONS.includes(action.type)) return 'Unsupported device action.';
+    if (action.url !== undefined || action.phoneNumber !== undefined || action.messageText !== undefined ||
+        (action.type !== 'OPEN_APP' && action.appName !== undefined) ||
+        (action.type !== 'SEARCH_YOUTUBE' && action.query !== undefined)) return 'Unexpected action parameters.';
+    if ([action.appName, action.query].some(value => value !== undefined && (typeof value !== 'string' || /[\x00-\x1f\x7f-\x9f]/.test(value)))) return 'Invalid action parameters.';
+    if (action.type === 'SEARCH_YOUTUBE' && (!action.query?.trim() || action.query.length > 300)) return 'A valid YouTube search query is required.';
+    if (action.type === 'OPEN_APP' && (!action.appName || !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,79}$/u.test(action.appName))) return 'A valid application name is required.';
+    return null;
+  }
+
+  private static plainResponse(text: string): ActionParseResult {
+    return { hasAction: false, cleanedText: text, spokenSummary: text };
   }
 
   public static generateSpokenSummary(action: AssistantAction, fallbackText: string): string {
     switch (action.type) {
+      case 'OPEN_YOUTUBE':
+        return 'Opening YouTube.';
+      case 'OPEN_CHROME':
+        return 'Opening Google Chrome.';
       case 'SEARCH_YOUTUBE':
         return `Opening ${action.query || 'search'} on YouTube.`;
       case 'OPEN_APP':
@@ -176,22 +126,25 @@ export class ActionHandler {
     }
   }
 
-  public static async executeAction(action: AssistantAction): Promise<{ success: boolean; message: string; targetUrl?: string }> {
+  public static async executeAction(action: AssistantAction, signal?: AbortSignal): Promise<{ success: boolean; message: string; targetUrl?: string }> {
+    const invalid = this.validateAction(action);
+    if (invalid) return { success: false, message: invalid };
+    signal?.throwIfAborted();
     logger.log('ACTION_EXECUTED', `Executing Android Intent for action: ${action.type}`, { action });
 
     switch (action.type) {
+      case 'OPEN_YOUTUBE':
+        return this.executeAction({ ...action, type: 'OPEN_APP', appName: 'YouTube' }, signal);
+      case 'OPEN_CHROME':
+        return this.executeAction({ ...action, type: 'OPEN_APP', appName: 'Google Chrome' }, signal);
       case 'SEARCH_YOUTUBE': {
-        const query = action.query || 'Telugu songs';
+        const query = action.query!;
         const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-        action.intentAction = 'android.intent.action.VIEW';
-        action.intentDataUri = youtubeUrl;
-        action.executed = true;
-        action.resultMessage = `Launched YouTube search for: "${query}"`;
         
         try {
           window.open(youtubeUrl, '_blank', 'noopener,noreferrer');
-        } catch (e) {
-          console.warn('Popup blocked, provided clickable link', e);
+        } catch (error) {
+          return { success: false, message: `Unable to open YouTube: ${error instanceof Error ? error.message : 'browser launch failed'}.` };
         }
 
         return {
@@ -203,31 +156,21 @@ export class ActionHandler {
 
       case 'OPEN_APP': {
         const app = (action.appName || '').toLowerCase();
-        let targetUrl = '';
-        if (app.includes('youtube')) {
-          targetUrl = 'https://www.youtube.com';
-        } else if (app.includes('chrome') || app.includes('browser')) {
-          targetUrl = 'https://www.google.com';
-        } else if (app.includes('maps')) {
-          targetUrl = 'https://maps.google.com';
-        } else if (app.includes('whatsapp')) {
-          targetUrl = 'https://web.whatsapp.com';
-        } else if (app.includes('spotify')) {
-          targetUrl = 'https://open.spotify.com';
-        } else if (app.includes('instagram')) {
-          targetUrl = 'https://www.instagram.com';
-        } else if (app.includes('netflix')) {
-          targetUrl = 'https://www.netflix.com';
-        }
+        const urls: Record<string, string> = {
+          youtube: 'https://www.youtube.com', chrome: 'https://www.google.com', 'google chrome': 'https://www.google.com',
+          browser: 'https://www.google.com', maps: 'https://maps.google.com', 'google maps': 'https://maps.google.com',
+          whatsapp: 'https://web.whatsapp.com', spotify: 'https://open.spotify.com',
+          instagram: 'https://www.instagram.com', netflix: 'https://www.netflix.com',
+        };
+        const targetUrl = urls[app] || '';
 
-        action.executed = true;
-        action.resultMessage = `Dispatched Android Intent: android.intent.action.MAIN -> package ${action.appName}`;
+        if (!targetUrl) return { success: false, message: `${action.appName} can only be launched from the Android app.` };
 
         if (targetUrl) {
           try {
             window.open(targetUrl, '_blank', 'noopener,noreferrer');
-          } catch (e) {
-            console.warn('Window open blocked', e);
+          } catch (error) {
+            return { success: false, message: `Unable to open ${action.appName}: ${error instanceof Error ? error.message : 'browser launch failed'}.` };
           }
         }
 
@@ -239,30 +182,14 @@ export class ActionHandler {
       }
 
       case 'OPEN_SETTINGS': {
-        action.executed = true;
-        action.resultMessage = 'Dispatched Android Intent: android.settings.SETTINGS';
         return {
-          success: true,
-          message: 'Opened system settings screen.',
+          success: false,
+          message: 'Opening device settings is available in the Android app.',
         };
       }
 
-      case 'OPEN_URL': {
-        if (action.url) {
-          action.executed = true;
-          action.resultMessage = `Dispatched Intent ACTION_VIEW: ${action.url}`;
-          try {
-            window.open(action.url, '_blank', 'noopener,noreferrer');
-          } catch (e) {
-            console.warn(e);
-          }
-          return { success: true, message: `Opened URL: ${action.url}`, targetUrl: action.url };
-        }
-        return { success: false, message: 'No URL specified.' };
-      }
-
       default:
-        return { success: true, message: `Action ${action.type} handled.` };
+        return { success: false, message: 'Unsupported device action.' };
     }
   }
 }

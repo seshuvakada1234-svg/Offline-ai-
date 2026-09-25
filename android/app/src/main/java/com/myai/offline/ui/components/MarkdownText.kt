@@ -63,6 +63,8 @@ sealed class MarkdownBlock {
 }
 
 object MarkdownParser {
+    private val heading = Regex("^(#{1,3})[ \\t]+(.*)$")
+
     fun parse(rawText: String): List<MarkdownBlock> {
         val blocks = mutableListOf<MarkdownBlock>()
         val lines = rawText.lines()
@@ -87,16 +89,9 @@ object MarkdownParser {
 
             // Headings (#, ##, ###)
             val trimmed = line.trimStart()
-            if (trimmed.startsWith("### ")) {
-                blocks.add(MarkdownBlock.Heading(level = 3, text = trimmed.removePrefix("### ").trim()))
-                i++
-                continue
-            } else if (trimmed.startsWith("## ")) {
-                blocks.add(MarkdownBlock.Heading(level = 2, text = trimmed.removePrefix("## ").trim()))
-                i++
-                continue
-            } else if (trimmed.startsWith("# ")) {
-                blocks.add(MarkdownBlock.Heading(level = 1, text = trimmed.removePrefix("# ").trim()))
+            val headingMatch = heading.matchEntire(trimmed)
+            if (headingMatch != null) {
+                blocks.add(MarkdownBlock.Heading(level = headingMatch.groupValues[1].length, text = headingMatch.groupValues[2].trim()))
                 i++
                 continue
             }
@@ -147,9 +142,10 @@ object MarkdownParser {
                 val cur = lines[i]
                 if (cur.isBlank() ||
                     cur.trimStart().startsWith("```") ||
-                    cur.trimStart().startsWith("#") ||
+                    heading.matches(cur.trimStart()) ||
                     cur.trimStart().startsWith("- ") ||
                     cur.trimStart().startsWith("* ") ||
+                    cur.trimStart().startsWith("• ") ||
                     Regex("^\\d+\\.\\s+").containsMatchIn(cur.trimStart())) {
                     break
                 }

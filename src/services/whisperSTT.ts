@@ -12,6 +12,8 @@ export class WhisperSTTService {
   private animFrameId: number | null = null;
   private recognition: any = null;
   private isListening = false;
+  private session = 0;
+  private timeout: ReturnType<typeof setTimeout> | null = null;
 
   public isSupported(): boolean {
     return !!(navigator.mediaDevices?.getUserMedia && ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window));
@@ -30,13 +32,24 @@ export class WhisperSTTService {
       return;
     }
 
-    if (this.isListening) {
-      this.stopListening();
-    }
+    this.cancel();
+    const session = ++this.session;
+    this.timeout = setTimeout(() => {
+      if (session !== this.session) return;
+      this.cancel();
+      options.onError?.('Voice input timed out. Please try again.');
+      options.onStateChange?.('IDLE');
+    }, 60_000);
 
     try {
       logger.log('VOICE_START', 'Requesting microphone permission for local Whisper audio capture');
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      if (session !== this.session) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      this.mediaStream = stream;
+      this.isListening = true;
 
       // Setup Web Audio Analyser for live visualizer
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
@@ -49,7 +62,7 @@ export class WhisperSTTService {
 
         const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
         const updateLevels = () => {
-          if (!this.isListening || !this.analyser) return;
+          if (session !== this.session || !this.isListening || !this.analyser) return;
           this.analyser.getByteFrequencyData(dataArray);
           let sum = 0;
           for (let i = 0; i < dataArray.length; i++) {
@@ -63,7 +76,6 @@ export class WhisperSTTService {
         updateLevels();
       }
 
-      this.isListening = true;
       options.onStateChange?.('LISTENING');
 
       // Initialize Web Speech API for real-time speech-to-text
@@ -76,12 +88,15 @@ export class WhisperSTTService {
 
         let interimTranscript = '';
         let finalTranscript = '';
+        let finished = false;
 
         this.recognition.onstart = () => {
+          if (session !== this.session) return;
           logger.log('VOICE_START', `Whisper listening started (lang: ${this.recognition.lang})`);
         };
 
         this.recognition.onresult = (event: any) => {
+          if (session !== this.session || finished) return;
           interimTranscript = '';
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             if (event.results[i].isFinal) {
@@ -92,10 +107,13 @@ export class WhisperSTTService {
           }
 
           const currentText = finalTranscript || interimTranscript;
-          options.onTranscript?.(currentText, !!finalTranscript);
+          // Final submission happens once, in onend. onresult only updates the preview.
+          options.onTranscript?.(currentText, false);
         };
 
         this.recognition.onerror = (event: any) => {
+          if (session !== this.session || finished) return;
+          finished = true;
           logger.log('VOICE_TRANSCRIPT', `Whisper STT error: ${event.error}`);
           if (event.error === 'not-allowed') {
             options.onError?.('Microphone access denied. Please grant microphone permissions.');
@@ -109,19 +127,16 @@ export class WhisperSTTService {
         };
 
         this.recognition.onend = () => {
+          if (session !== this.session || finished) return;
+          finished = true;
           options.onStateChange?.('TRANSCRIBING');
           const result = finalTranscript.trim() || interimTranscript.trim();
           logger.log('VOICE_TRANSCRIPT', `Whisper final transcript: "${result}"`, { transcript: result });
           
-          setTimeout(() => {
-            if (!result) {
-              options.onError?.('No speech captured.');
-            } else {
-              options.onTranscript?.(result, true);
-            }
-            this.cleanup();
-            options.onStateChange?.('IDLE');
-          }, 300);
+          this.cleanup();
+          if (!result) options.onError?.('No speech captured.');
+          else options.onTranscript?.(result, true);
+          options.onStateChange?.('IDLE');
         };
 
         this.recognition.start();
@@ -131,6 +146,7 @@ export class WhisperSTTService {
         options.onStateChange?.('IDLE');
       }
     } catch (err: any) {
+      if (session !== this.session) return;
       logger.log('VOICE_START', `Microphone permission failed: ${err?.message}`);
       options.onError?.(err?.name === 'NotAllowedError' ? 'Microphone permission denied.' : 'Failed to access microphone.');
       this.cleanup();
@@ -146,10 +162,12 @@ export class WhisperSTTService {
         // ignore
       }
     }
-    this.cleanup();
+    // Keep the final-result callback and timeout alive until recognition.onend.
+    this.mediaStream?.getTracks().forEach(track => track.stop());
   }
 
   public cancel(): void {
+    ++this.session;
     if (this.recognition) {
       try {
         this.recognition.abort();
@@ -161,6 +179,10 @@ export class WhisperSTTService {
   }
 
   private cleanup(): void {
+    if (this.timeout !== null) {
+      clearTimeout(this.timeout);
+      this.timeout = null;
+    }
     this.isListening = false;
     if (this.animFrameId) {
       cancelAnimationFrame(this.animFrameId);

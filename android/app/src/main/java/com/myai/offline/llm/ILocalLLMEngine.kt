@@ -12,6 +12,7 @@ interface ILocalLLMEngine {
     suspend fun loadModel(model: ModelInfo, threads: Int = 4, ctxSize: Int = 4096): Long
     suspend fun unloadModel()
     fun stopGeneration()
+    fun close()
     fun formatPrompt(
         modelId: ModelId,
         systemPrompt: String = PromptFormatter.DEFAULT_SYSTEM_PROMPT,

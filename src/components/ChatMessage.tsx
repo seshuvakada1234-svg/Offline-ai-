@@ -19,13 +19,13 @@ import {
 interface ChatMessageProps {
   message: Message;
   activeModelName?: string;
-  onActionUpdated?: (action: any) => void;
+  loadingText?: string;
 }
 
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
   activeModelName = 'Qwen3 1.7B',
-  onActionUpdated,
+  loadingText = 'Generating response...',
 }) => {
   const [copied, setCopied] = React.useState(false);
   const [isSpeaking, setIsSpeaking] = React.useState(false);
@@ -109,7 +109,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
         {isThinking ? (
           <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-900 border border-white/10 text-xs text-zinc-400 italic">
             <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
-            <span>Thinking...</span>
+            <span>{loadingText}</span>
           </div>
         ) : (
           <div className="text-xs sm:text-sm text-zinc-200 leading-relaxed font-sans">
@@ -123,7 +123,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             {/* Action Card if present */}
             {message.action && (
               <div className="mt-3">
-                <ActionCard action={message.action} onActionUpdated={onActionUpdated} />
+                <ActionCard action={message.action} />
               </div>
             )}
 

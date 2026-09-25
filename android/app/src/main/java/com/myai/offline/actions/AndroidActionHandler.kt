@@ -10,6 +10,11 @@ import android.provider.MediaStore
 import android.provider.Settings
 import com.myai.offline.data.model.AssistantAction
 import com.myai.offline.data.model.AssistantActionType
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 
 class AndroidActionHandler(private val context: Context) {
@@ -23,26 +28,26 @@ class AndroidActionHandler(private val context: Context) {
     /**
      * Executes the validated action safely using explicit/implicit Android Intents.
      */
-    fun execute(action: AssistantAction): ExecutionOutcome {
+    suspend fun execute(action: AssistantAction): ExecutionOutcome = withContext(Dispatchers.IO) {
         val validation = ActionValidator.validate(action)
         if (validation is ActionValidator.ValidationResult.Invalid) {
-            return ExecutionOutcome(
+            return@withContext ExecutionOutcome(
                 success = false,
                 message = "Action validation failed: ${validation.reason}"
             )
         }
 
-        return try {
+        try {
             when (action.type) {
                 AssistantActionType.OPEN_YOUTUBE -> openYouTube()
                 AssistantActionType.SEARCH_YOUTUBE -> searchYouTube(action.query ?: "")
                 AssistantActionType.OPEN_CHROME -> openChrome()
                 AssistantActionType.OPEN_SETTINGS -> openSettings()
-                AssistantActionType.OPEN_URL -> openUrl(action.url ?: "")
                 AssistantActionType.OPEN_APP -> openSpecificApp(action.appName ?: "")
-                AssistantActionType.MAKE_CALL -> makePhoneCall(action.phoneNumber ?: "")
-                AssistantActionType.SEND_SMS -> sendSmsMessage(action.phoneNumber ?: "", action.messageText ?: "")
+                else -> ExecutionOutcome(false, "Unsupported device action: ${action.type.rawValue}")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             ExecutionOutcome(
                 success = false,
@@ -51,23 +56,23 @@ class AndroidActionHandler(private val context: Context) {
         }
     }
 
-    private fun openYouTube(): ExecutionOutcome {
+    private suspend fun openYouTube(): ExecutionOutcome {
         val pm = context.packageManager
         val youtubeIntent = pm.getLaunchIntentForPackage("com.google.android.youtube")
         return if (youtubeIntent != null) {
             youtubeIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(youtubeIntent)
+            dispatch(youtubeIntent)
             ExecutionOutcome(true, "Opening YouTube app.", "YouTube")
         } else {
             // Fallback to web URL in browser
             val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com"))
             webIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(webIntent)
+            dispatch(webIntent)
             ExecutionOutcome(true, "YouTube app not found. Opened YouTube in web browser.", "Browser")
         }
     }
 
-    private fun searchYouTube(query: String): ExecutionOutcome {
+    private suspend fun searchYouTube(query: String): ExecutionOutcome {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val appUri = Uri.parse("vnd.youtube://results?search_query=$encodedQuery")
         val webUri = Uri.parse("https://www.youtube.com/results?search_query=$encodedQuery")
@@ -78,54 +83,42 @@ class AndroidActionHandler(private val context: Context) {
         }
 
         return if (isIntentAvailable(appIntent)) {
-            context.startActivity(appIntent)
+            dispatch(appIntent)
             ExecutionOutcome(true, "Searching for \"$query\" on YouTube app.", "YouTube")
         } else {
             val webIntent = Intent(Intent.ACTION_VIEW, webUri).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(webIntent)
+            dispatch(webIntent)
             ExecutionOutcome(true, "Searching for \"$query\" on YouTube via web browser.", "Browser")
         }
     }
 
-    private fun openChrome(): ExecutionOutcome {
+    private suspend fun openChrome(): ExecutionOutcome {
         val pm = context.packageManager
         val chromeIntent = pm.getLaunchIntentForPackage("com.android.chrome")
         return if (chromeIntent != null) {
             chromeIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(chromeIntent)
+            dispatch(chromeIntent)
             ExecutionOutcome(true, "Opening Google Chrome.", "Chrome")
         } else {
             val defaultBrowserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com")).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(defaultBrowserIntent)
+            dispatch(defaultBrowserIntent)
             ExecutionOutcome(true, "Chrome not installed. Opened default browser.", "Browser")
         }
     }
 
-    private fun openSettings(): ExecutionOutcome {
+    private suspend fun openSettings(): ExecutionOutcome {
         val intent = Intent(Settings.ACTION_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(intent)
+        dispatch(intent)
         return ExecutionOutcome(true, "Opening Android system settings.", "Settings")
     }
 
-    private fun openUrl(urlStr: String): ExecutionOutcome {
-        val validUrl = if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
-            "https://$urlStr"
-        } else urlStr
-
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(validUrl)).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
-        return ExecutionOutcome(true, "Opened link: $validUrl", "Browser")
-    }
-
-    private fun openSpecificApp(appName: String): ExecutionOutcome {
+    private suspend fun openSpecificApp(appName: String): ExecutionOutcome {
         val pm = context.packageManager
         val cleanName = appName.trim().lowercase()
             .removePrefix("the ")
@@ -142,7 +135,7 @@ class AndroidActionHandler(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 if (isIntentAvailable(cameraIntent)) {
-                    context.startActivity(cameraIntent)
+                    dispatch(cameraIntent)
                     return ExecutionOutcome(true, "Opening Camera.", "Camera")
                 }
             }
@@ -151,7 +144,7 @@ class AndroidActionHandler(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 if (isIntentAvailable(galleryIntent)) {
-                    context.startActivity(galleryIntent)
+                    dispatch(galleryIntent)
                     return ExecutionOutcome(true, "Opening Gallery.", "Gallery")
                 }
             }
@@ -160,7 +153,7 @@ class AndroidActionHandler(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 if (isIntentAvailable(clockIntent)) {
-                    context.startActivity(clockIntent)
+                    dispatch(clockIntent)
                     return ExecutionOutcome(true, "Opening Clock.", "Clock")
                 }
             }
@@ -169,7 +162,7 @@ class AndroidActionHandler(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 if (isIntentAvailable(contactsIntent)) {
-                    context.startActivity(contactsIntent)
+                    dispatch(contactsIntent)
                     return ExecutionOutcome(true, "Opening Contacts.", "Contacts")
                 }
             }
@@ -177,7 +170,7 @@ class AndroidActionHandler(private val context: Context) {
                 val dialerIntent = Intent(Intent.ACTION_DIAL).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                context.startActivity(dialerIntent)
+                dispatch(dialerIntent)
                 return ExecutionOutcome(true, "Opening Phone Dialer.", "Phone")
             }
             "maps", "google maps" -> {
@@ -186,7 +179,7 @@ class AndroidActionHandler(private val context: Context) {
                     Uri.parse("geo:0,0?q=")
                 ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
                 mapsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(mapsIntent)
+                dispatch(mapsIntent)
                 return ExecutionOutcome(true, "Opening Google Maps.", "Maps")
             }
             "messages", "sms", "messaging" -> {
@@ -195,7 +188,7 @@ class AndroidActionHandler(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 if (isIntentAvailable(messagingIntent)) {
-                    context.startActivity(messagingIntent)
+                    dispatch(messagingIntent)
                     return ExecutionOutcome(true, "Opening Messages.", "Messages")
                 }
             }
@@ -205,7 +198,7 @@ class AndroidActionHandler(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 emailIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(emailIntent)
+                dispatch(emailIntent)
                 return ExecutionOutcome(true, "Opening Email.", "Email")
             }
         }
@@ -235,7 +228,7 @@ class AndroidActionHandler(private val context: Context) {
             val intent = pm.getLaunchIntentForPackage(knownPkg)
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
+                dispatch(intent)
                 return ExecutionOutcome(true, "Opening $appName.", appName)
             }
         }
@@ -244,11 +237,11 @@ class AndroidActionHandler(private val context: Context) {
         val directIntent = pm.getLaunchIntentForPackage(appName)
         if (directIntent != null) {
             directIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(directIntent)
+            dispatch(directIntent)
             return ExecutionOutcome(true, "Opening $appName.", appName)
         }
 
-        // 4. Query all launchable activities on device for exact or partial label match
+        // 4. Resolve an exact installed application label; prose is never a fuzzy app name.
         try {
             val launcherIntent = Intent(Intent.ACTION_MAIN, null).apply {
                 addCategory(Intent.CATEGORY_LAUNCHER)
@@ -264,59 +257,25 @@ class AndroidActionHandler(private val context: Context) {
                 val launchIntent = pm.getLaunchIntentForPackage(targetPkg)
                 if (launchIntent != null) {
                     launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(launchIntent)
+                    dispatch(launchIntent)
                     val label = pm.getApplicationLabel(exactMatch.activityInfo.applicationInfo).toString()
                     return ExecutionOutcome(true, "Opening $label.", label)
                 }
             }
 
-            // Try fuzzy label or package match
-            val fuzzyMatch = resolveInfos.firstOrNull {
-                val label = pm.getApplicationLabel(it.activityInfo.applicationInfo).toString().lowercase()
-                val pkg = it.activityInfo.packageName.lowercase()
-                label.contains(cleanName) || pkg.contains(cleanName) || cleanName.contains(label)
-            }
-            if (fuzzyMatch != null) {
-                val targetPkg = fuzzyMatch.activityInfo.packageName
-                val launchIntent = pm.getLaunchIntentForPackage(targetPkg)
-                if (launchIntent != null) {
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(launchIntent)
-                    val label = pm.getApplicationLabel(fuzzyMatch.activityInfo.applicationInfo).toString()
-                    return ExecutionOutcome(true, "Opening $label.", label)
-                }
-            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // Fall through
-        }
-
-        // 5. Fallback: Search on Google Play Store
-        val playStoreSearch = Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=${Uri.encode(appName)}")).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        if (isIntentAvailable(playStoreSearch)) {
-            context.startActivity(playStoreSearch)
-            return ExecutionOutcome(true, "$appName not found. Searching on Google Play Store.", appName)
         }
 
         return ExecutionOutcome(false, "Could not find an installed application matching \"$appName\".")
     }
 
-    private fun makePhoneCall(phoneNumber: String): ExecutionOutcome {
-        val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$phoneNumber")).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
+    private suspend fun dispatch(intent: Intent) {
+        // Resolution may finish after a cancelled/expired request. Never launch its delayed intent.
+        currentCoroutineContext().ensureActive()
         context.startActivity(intent)
-        return ExecutionOutcome(true, "Opened dialer for $phoneNumber", "Phone")
-    }
-
-    private fun sendSmsMessage(phoneNumber: String, text: String): ExecutionOutcome {
-        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$phoneNumber")).apply {
-            putExtra("sms_body", text)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
-        return ExecutionOutcome(true, "Prepared SMS message for $phoneNumber", "SMS")
     }
 
     private fun isIntentAvailable(intent: Intent): Boolean {

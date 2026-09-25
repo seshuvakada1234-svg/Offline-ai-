@@ -127,7 +127,6 @@ class LocalLLMEngineTest {
     @Test
     fun testActionParsingFromLLMOutput() {
         val sampleLLMResponse = """
-            I am opening the YouTube app for you.
             ```json
             {
               "action": "OPEN_YOUTUBE"
@@ -139,7 +138,7 @@ class LocalLLMEngineTest {
         assertTrue(parsed.hasAction)
         assertNotNull(parsed.action)
         assertEquals(AssistantActionType.OPEN_YOUTUBE, parsed.action?.type)
-        assertEquals("I am opening the YouTube app for you.", parsed.cleanText)
+        assertEquals("", parsed.cleanText)
         assertFalse(parsed.isMalformed)
     }
 

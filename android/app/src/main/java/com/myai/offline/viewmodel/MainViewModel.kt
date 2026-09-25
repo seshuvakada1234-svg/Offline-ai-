@@ -2,13 +2,15 @@ package com.myai.offline.viewmodel
 
 import android.app.Application
 import android.content.Context
-import android.net.Uri
 import android.os.BatteryManager
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.myai.offline.actions.ActionParser
 import com.myai.offline.actions.AndroidActionHandler
+import com.myai.offline.actions.ActionValidator
+import com.myai.offline.assistant.AssistantResponsePipeline
+import com.myai.offline.assistant.ResponsePhase
+import androidx.room.withTransaction
 import com.myai.offline.data.database.AppDatabase
 import com.myai.offline.data.database.ConversationEntity
 import com.myai.offline.data.database.MessageEntity
@@ -24,15 +26,25 @@ import com.myai.offline.data.model.VoiceState
 import com.myai.offline.data.repository.ModelRepository
 import com.myai.offline.llm.ILocalLLMEngine
 import com.myai.offline.llm.LocalLLMEngine
-import com.myai.offline.utils.SimpleMathEvaluator
 import com.myai.offline.voice.AudioRecorder
 import com.myai.offline.voice.MoonshineEngine
 import com.myai.offline.voice.TtsManager
 import com.myai.offline.voice.WhisperEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -79,6 +91,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
 
+    private val _responsePhase = MutableStateFlow(ResponsePhase.IDLE)
+    val responsePhase: StateFlow<ResponsePhase> = _responsePhase.asStateFlow()
+
     private val _streamingMessage = MutableStateFlow("")
     val streamingMessage: StateFlow<String> = _streamingMessage.asStateFlow()
 
@@ -108,9 +123,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _batteryLevel = MutableStateFlow(100)
     val batteryLevel: StateFlow<Int> = _batteryLevel.asStateFlow()
 
-    private val sendMutex = Mutex()
+    private val responsePipeline = AssistantResponsePipeline()
+    private val backgroundTasks = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private data class Request(
+        val conversationId: String,
+        val userText: String,
+        val assistantMessageId: String = UUID.randomUUID().toString(),
+        val startedAt: Long = System.currentTimeMillis(),
+        var partialText: String = "",
+        var finalText: String? = null
+    )
+    private var activeRequest: Request? = null
     private var messageCollectionJob: Job? = null
     private var activeGenerationJob: Job? = null
+    private var voiceJob: Job? = null
+    private var voiceSession = 0L
+    private val speechMutex = Mutex()
+    private val modelActivationMutex = Mutex()
     private var moonshineAutoInitAttempted = false
     private var whisperAutoInitAttempted = false
     private var kokoroAutoInitAttempted = false
@@ -138,9 +167,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            withContext(Dispatchers.Main) { createNewConversation() }
             modelRepository.checkLocalModelFiles()
             activateStartupDefaultModel()
-            createNewConversation()
             updateDeviceMetrics()
         }
     }
@@ -163,7 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun autoInitializeSpeechModels(modelList: List<ModelInfo>) {
+    private suspend fun autoInitializeSpeechModels(modelList: List<ModelInfo>) = speechMutex.withLock {
         try {
             val readyStates = setOf(ModelState.READY, ModelState.ACTIVE)
 
@@ -212,9 +241,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.w(TAG, "[KOKORO_AUTO_INIT] Kokoro model present but initialization failed")
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (t: Throwable) {
         Log.e(TAG, "[SPEECH_AUTO_INIT] Failed during speech auto-init: ${t.message}", t)
     }
+    Unit
 }
 
     fun updateComposerText(text: String) {
@@ -222,22 +254,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun createNewConversation() {
+        cancelVoice()
         val newId = UUID.randomUUID().toString()
         _currentConversationId.value = newId
         _messages.value = emptyList()
 
-        viewModelScope.launch(Dispatchers.IO) {
-            val conversation = ConversationEntity(
-                id = newId,
-                title = "New Chat",
-                selectedModelId = _selectedModelId.value.rawValue
-            )
-            conversationDao.insertConversation(conversation)
-        }
+        // Persist the conversation atomically with its first user message.
         observeConversation(newId)
     }
 
     fun selectConversation(id: String) {
+        cancelVoice()
         _currentConversationId.value = id
         observeConversation(id)
     }
@@ -252,7 +279,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectModel(id: ModelId) {
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch {
+            cancelVoice()
             val activated = activateModelInternal(id, persistSelection = true)
             if (!activated) {
                 val modelName = modelRepository.getModel(id)?.name ?: id.rawValue
@@ -261,7 +289,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun activateModelInternal(id: ModelId, persistSelection: Boolean): Boolean {
+    private suspend fun activateModelInternal(id: ModelId, persistSelection: Boolean): Boolean = modelActivationMutex.withLock {
+        if (llmEngine.isModelLoaded && llmEngine.currentLoadedModel?.id == id) {
+            modelRepository.markModelActive(id)
+            if (persistSelection) modelRepository.selectModel(id)
+            return@withLock true
+        }
+        activateModelLocked(id, persistSelection)
+    }
+
+    private suspend fun activateModelLocked(id: ModelId, persistSelection: Boolean): Boolean {
         val model = modelRepository.getModel(id) ?: return false
         if (!model.isChatModel) return false
 
@@ -278,349 +315,304 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         modelRepository.markModelLoading(id)
 
         return try {
-            llmEngine.loadModel(
-                model = model,
-                threads = recommendedThreadCount(),
-                ctxSize = minOf(DEFAULT_RUNTIME_CONTEXT, model.contextSize)
-            )
+            withTimeout(MODEL_LOAD_TIMEOUT_MS) {
+                llmEngine.loadModel(
+                    model = model,
+                    threads = recommendedThreadCount(),
+                    ctxSize = minOf(DEFAULT_RUNTIME_CONTEXT, model.contextSize)
+                )
+            }
             modelRepository.markModelActive(id)
             Log.i(TAG, "[MODEL_LOAD_SUCCESS] Activated model ${model.name}")
             true
+        } catch (e: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            modelRepository.markModelLoadFailed(id, "Model loading timed out. Please try again.")
+            false
+        } catch (e: CancellationException) {
+            modelRepository.markModelReady(id)
+            throw e
         } catch (e: Exception) {
             val message = e.localizedMessage ?: "Unable to load model"
             modelRepository.markModelLoadFailed(id, message)
             Log.e(TAG, "[MODEL_LOAD_FAILED] ${model.name}: $message", e)
             false
+        } finally {
+            if (modelRepository.getModel(id)?.state == ModelState.LOADING) {
+                modelRepository.markModelReady(id)
+            }
         }
     }
 
     fun sendMessage(userText: String, isVoice: Boolean = false) {
-        val conversationId = _currentConversationId.value ?: return
         val trimmed = userText.trim()
         if (trimmed.isEmpty()) return
 
-        if (_isGenerating.value) {
-            Log.w(TAG, "Cancelling active generation before starting new response")
+        viewModelScope.launch {
+            val conversationId = _currentConversationId.value ?: return@launch
+            val previous = activeRequest
+            if (previous?.conversationId == conversationId && previous.userText == trimmed &&
+                System.currentTimeMillis() - previous.startedAt < DUPLICATE_WINDOW_MS
+            ) return@launch
+
             stopGeneration()
-        }
+            val request = Request(conversationId, trimmed)
+            activeRequest = request
+            _composerText.value = ""
+            _isGenerating.value = true
+            _responsePhase.value = ResponsePhase.GENERATING
+            _streamingMessage.value = ""
 
-        viewModelScope.launch(Dispatchers.IO) {
-            sendMutex.withLock {
-                val existing = messageDao.getMessagesList(conversationId)
-                val last = existing.lastOrNull()
-                if (last != null &&
-                    last.role == "user" &&
-                    last.content == trimmed &&
-                    (System.currentTimeMillis() - last.timestamp) < DUPLICATE_WINDOW_MS
-                ) {
-                    Log.w(TAG, "Skipped duplicate user submission within debounce window")
-                    return@withLock
-                }
-
-                val userMessage = MessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = conversationId,
-                    role = "user",
-                    content = trimmed,
-                    isVoiceInput = isVoice
-                )
-
-                messageDao.insertMessage(userMessage)
-
-                if (existing.isEmpty()) {
-                    val title = if (trimmed.length > 30) trimmed.take(27) + "..." else trimmed
-                    conversationDao.updateConversationTitle(conversationId, title)
+            activeGenerationJob = viewModelScope.launch {
+                var metrics: InferenceMetrics? = null
+                try {
+                    withTimeout(REQUEST_TIMEOUT_MS) {
+                        db.withTransaction {
+                            if (conversationDao.getConversationById(conversationId) == null) {
+                                conversationDao.insertConversation(ConversationEntity(
+                                    id = conversationId,
+                                    title = trimmed.take(30),
+                                    selectedModelId = _selectedModelId.value.rawValue
+                                ))
+                            }
+                            messageDao.insertMessage(MessageEntity(
+                                conversationId = conversationId,
+                                role = "user",
+                                content = trimmed,
+                                timestamp = request.startedAt,
+                                isVoiceInput = isVoice
+                            ))
+                        }
+                        val response = responsePipeline.respond(
+                            userText = trimmed,
+                            generate = { generateResponse(conversationId, trimmed) { metrics = it } },
+                            execute = { executeActionSafely(it, "explicit_user_request") },
+                            onPhase = { phase ->
+                                if (activeRequest === request) {
+                                    _responsePhase.value = phase
+                                    if (isVoice) {
+                                        _voiceState.value = when (phase) {
+                                            ResponsePhase.GENERATING -> VoiceState.THINKING
+                                            ResponsePhase.EXECUTING_ACTION -> VoiceState.ACTION_EXECUTING
+                                            ResponsePhase.IDLE -> VoiceState.IDLE
+                                        }
+                                    }
+                                }
+                            },
+                            onText = { fullText ->
+                                request.partialText = fullText
+                                if (activeRequest === request) _streamingMessage.value = fullText
+                            }
+                        )
+                        request.finalText = response.text
+                        insertAssistantMessage(conversationId, response.text, request.assistantMessageId, metrics, response.action,
+                            timestamp = request.startedAt + 1)
+                        val shouldSpeak = isVoice && activeRequest === request
+                        finishRequest(request)
+                        if (shouldSpeak) {
+                            _voiceTranscript.value = response.text
+                            speakMessage(request.assistantMessageId, response.text)
+                        }
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    finishRequest(request)
+                    saveInterruptedResponse(request, "The request timed out. Please try again.")
+                } catch (e: CancellationException) {
+                    finishRequest(request)
+                    saveInterruptedResponse(request, "Response stopped.")
+                    throw e
+                } catch (e: Exception) {
+                    finishRequest(request)
+                    saveInterruptedResponse(request, "Unable to complete the request: ${e.localizedMessage ?: "unknown error"}")
+                } finally {
+                    finishRequest(request)
                 }
             }
-
-            withContext(Dispatchers.Main) {
-                _composerText.value = ""
-            }
-
-            // 1. Instant App Launching & Fast Actions (< 20ms)
-            val fastAction = detectFastCommand(trimmed)
-            if (fastAction != null) {
-                _voiceState.value = VoiceState.ACTION_EXECUTING
-                val outcome = executeActionSafely(fastAction, source = "fast_text_command")
-                insertAssistantMessage(conversationId, outcome.message)
-                if (isVoice) {
-                    _voiceTranscript.value = outcome.message
-                    _voiceState.value = VoiceState.SPEAKING
-                    ttsManager.speak(outcome.message)
-                }
-                return@launch
-            }
-
-            // 2. Instant Greetings (< 10ms)
-            val fastGreeting = detectFastGreeting(trimmed)
-            if (fastGreeting != null) {
-                insertAssistantMessage(conversationId, fastGreeting)
-                if (isVoice) {
-                    _voiceTranscript.value = fastGreeting
-                    _voiceState.value = VoiceState.SPEAKING
-                    ttsManager.speak(fastGreeting)
-                }
-                return@launch
-            }
-
-            // 3. Instant Math Calculation (< 1ms)
-            val fastMath = detectFastMath(trimmed)
-            if (fastMath != null) {
-                insertAssistantMessage(conversationId, fastMath)
-                if (isVoice) {
-                    _voiceTranscript.value = fastMath
-                    _voiceState.value = VoiceState.SPEAKING
-                    ttsManager.speak(fastMath)
-                }
-                return@launch
-            }
-
-            // 4. Ultra-Fast On-Device LLM Inference (1-2s target)
-            generateAssistantResponse(
-                conversationId = conversationId,
-                userQuery = trimmed,
-                shouldSpeakResponse = isVoice
-            )
         }
     }
 
-    private fun generateAssistantResponse(
+    private fun generateResponse(
         conversationId: String,
         userQuery: String,
-        shouldSpeakResponse: Boolean
-    ) {
-        _isGenerating.value = true
-        _streamingMessage.value = ""
-
-        activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val selectedModel = modelRepository.getModel(_selectedModelId.value)
-                if (selectedModel == null || selectedModel.state == ModelState.NOT_INSTALLED) {
-                    insertAssistantMessage(
-                        conversationId,
-                        "Download ${selectedModel?.name ?: "a model"} to chat."
-                    )
-                    return@launch
-                }
-
-                if (selectedModel.state != ModelState.ACTIVE ||
-                    !llmEngine.isModelLoaded ||
-                    llmEngine.currentLoadedModel?.id != selectedModel.id
-                ) {
-                    val activated = activateModelInternal(selectedModel.id, persistSelection = true)
-                    if (!activated) {
-                        val errorDetail = modelRepository.getModel(selectedModel.id)?.errorMessage
-                        val detailMsg = if (!errorDetail.isNullOrBlank()) ": $errorDetail" else ". Check Engine Logs for details."
-                        insertAssistantMessage(
-                            conversationId,
-                            "Unable to load model ${selectedModel.name}$detailMsg"
-                        )
-                        return@launch
-                    }
-                }
-
-                // Keep context short and relevant (last 4 messages, excluding current query) to guarantee fast inference
-                val history = messageDao.getMessagesList(conversationId)
-                    .dropLastWhile { it.role == "user" && it.content == userQuery }
-                    .takeLast(4)
-                    .map { it.role to it.content }
-
-                val thinkPos = userQuery.lastIndexOf("/think", ignoreCase = true)
-                val noThinkPos = userQuery.lastIndexOf("/no_think", ignoreCase = true)
-                val enableThinking = thinkPos >= 0 && thinkPos > noThinkPos
-
-                val prompt = llmEngine.formatPrompt(
-                    modelId = _selectedModelId.value,
-                    conversationHistory = history,
-                    userQuery = userQuery,
-                    enableThinking = enableThinking
-                )
-
-                val streamedText = StringBuilder()
-                var metrics: InferenceMetrics? = null
-
-                // For on-device chat, 128-256 tokens generates in 1-2 seconds
-                val maxGenTokens = if (userQuery.length <= 30) 128 else 256
-
-                llmEngine.generateStreaming(
-                    prompt = prompt,
-                    userQuery = userQuery,
-                    maxTokens = maxGenTokens,
-                    onMetricsCalculated = { calculated ->
-                        metrics = calculated
-                    }
-                ).collect { tokenChunk ->
-                    streamedText.append(tokenChunk)
-                    _streamingMessage.value = streamedText.toString()
-                }
-
-                val finalText = streamedText.toString().trim()
-                if (finalText.isNotBlank()) {
-                    Log.i(TAG, "[LLM_RAW_RESPONSE] ${previewForLog(finalText)}")
-
-                    val parseResult = ActionParser.parse(finalText)
-                    if (parseResult.isMalformed) {
-                        Log.w(
-                            TAG,
-                            "[ACTION_PARSE_MALFORMED] rawAction=${previewForLog(parseResult.rawActionBlock.orEmpty())}"
-                        )
-                    }
-
-                    val parsedAction = parseResult.action
-                    val shouldAutoExecuteAction = parsedAction != null &&
-                        parseResult.hasAction &&
-                        !parsedAction.requiresConfirmation &&
-                        shouldAutoExecuteModelAction(userQuery, parsedAction)
-
-                    if (parsedAction != null && parseResult.hasAction) {
-                        Log.i(
-                            TAG,
-                            "[ACTION_DETECTED] type=${parsedAction.type} query=${parsedAction.query} app=${parsedAction.appName} url=${parsedAction.url} autoExecute=$shouldAutoExecuteAction"
-                        )
-                    }
-
-                    val metricsJson = metrics?.let {
-                        JSONObject().apply {
-                            put("timeToFirstTokenMs", it.timeToFirstTokenMs)
-                            put("tokensPerSec", it.tokensPerSec)
-                            put("totalTokens", it.totalTokens)
-                            put("totalGenTimeMs", it.totalGenTimeMs)
-                        }.toString()
-                    }
-
-                    val aiMessage = MessageEntity(
-                        id = UUID.randomUUID().toString(),
-                        conversationId = conversationId,
-                        role = "assistant",
-                        content = finalText,
-                        metricsJson = metricsJson
-                    )
-                    messageDao.insertMessage(aiMessage)
-
-                    if (shouldAutoExecuteAction && parsedAction != null) {
-                        executeAction(parsedAction, source = "llm_response")
-                    } else if (parseResult.hasAction && parsedAction != null && !parsedAction.requiresConfirmation) {
-                        Log.i(
-                            TAG,
-                            "[ACTION_SKIPPED] Model action not executed because user query does not appear to request an Android action. userQuery=${previewForLog(userQuery)}"
-                        )
-                    }
-
-                    if (shouldSpeakResponse) {
-                        val speakText = parseResult.cleanText.ifBlank { finalText }
-                        _voiceState.value = VoiceState.SPEAKING
-                        ttsManager.speak(speakText)
-                    }
-                }
-            } catch (e: Exception) {
-                if (e !is kotlinx.coroutines.CancellationException) {
-                    insertAssistantMessage(
-                        conversationId,
-                        "Unable to generate a response: ${e.localizedMessage ?: "unknown inference error"}"
-                    )
-                }
-            } finally {
-                _isGenerating.value = false
-                _streamingMessage.value = ""
+        onMetrics: (InferenceMetrics) -> Unit
+    ): Flow<String> = flow {
+        val model = modelRepository.getModel(_selectedModelId.value)
+            ?: error("Select a local model to chat.")
+        check(model.state != ModelState.NOT_INSTALLED) { "Download ${model.name} to chat." }
+        if (!llmEngine.isModelLoaded || llmEngine.currentLoadedModel?.id != model.id) {
+            check(activateModelInternal(model.id, persistSelection = true)) {
+                modelRepository.getModel(model.id)?.errorMessage ?: "Unable to load ${model.name}."
             }
+        }
+        val history = messageDao.getMessagesList(conversationId)
+            .dropLastWhile { it.role == "user" && it.content == userQuery }
+            .takeLast(4).map { it.role to it.content }
+        val prompt = llmEngine.formatPrompt(
+            modelId = model.id,
+            conversationHistory = history,
+            userQuery = userQuery,
+            enableThinking = false
+        )
+        llmEngine.generateStreaming(
+            prompt = prompt,
+            userQuery = userQuery,
+            maxTokens = if (userQuery.length <= 30) 128 else 256,
+            onMetricsCalculated = onMetrics
+        ).collect { emit(it) }
+    }.flowOn(Dispatchers.IO)
+
+    private suspend fun saveInterruptedResponse(request: Request, reason: String) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            runCatching {
+                withTimeout(SAVE_TIMEOUT_MS) {
+                    if (conversationDao.getConversationById(request.conversationId) != null) {
+                        val text = request.finalText ?: listOf(request.partialText.trim(), reason)
+                            .filter { it.isNotBlank() }.joinToString("\n\n")
+                        insertAssistantMessage(request.conversationId, text, request.assistantMessageId,
+                            timestamp = request.startedAt + 1)
+                    }
+                }
+            }.onFailure { Log.e(TAG, "Unable to save interrupted response", it) }
+        }
+    }
+
+    private fun finishRequest(request: Request) {
+        // An old cancelled job must never clear a newer request's state.
+        if (activeRequest === request) {
+            activeRequest = null
+            activeGenerationJob = null
+            _isGenerating.value = false
+            _responsePhase.value = ResponsePhase.IDLE
+            _streamingMessage.value = ""
+            _voiceState.value = VoiceState.IDLE
         }
     }
 
     fun stopGeneration() {
-        llmEngine.stopGeneration()
-        activeGenerationJob?.cancel()
-
-        val partial = _streamingMessage.value
-        val conversationId = _currentConversationId.value
-        if (partial.isNotBlank() && conversationId != null) {
-            viewModelScope.launch(Dispatchers.IO) {
-                insertAssistantMessage(conversationId, partial)
-            }
+        try {
+            llmEngine.stopGeneration()
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to signal native generation cancellation", e)
+        } finally {
+            activeGenerationJob?.cancel()
+            activeGenerationJob = null
+            activeRequest = null
+            _isGenerating.value = false
+            _responsePhase.value = ResponsePhase.IDLE
+            _streamingMessage.value = ""
+            _voiceState.value = VoiceState.IDLE
         }
-
-        _isGenerating.value = false
-        _streamingMessage.value = ""
     }
 
     fun startVoiceListening() {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (_voiceState.value != VoiceState.IDLE) {
-                return@launch
-            }
-
-            val preferredOrder = if (_selectedSttEngine.value == SpeechToTextEngine.MOONSHINE_TINY) {
-                listOf(SpeechToTextEngine.MOONSHINE_TINY, SpeechToTextEngine.WHISPER_BASE)
-            } else {
-                listOf(SpeechToTextEngine.WHISPER_BASE, SpeechToTextEngine.MOONSHINE_TINY)
-            }
-
-            var selectedRuntime: SpeechToTextEngine? = null
-            for (engine in preferredOrder) {
-                val ready = when (engine) {
-                    SpeechToTextEngine.MOONSHINE_TINY -> prepareMoonshineEngine()
-                    SpeechToTextEngine.WHISPER_BASE -> prepareWhisperEngine()
+        if (_voiceState.value != VoiceState.IDLE) return
+        stopGeneration()
+        stopSpeaking()
+        val session = ++voiceSession
+        _voiceState.value = VoiceState.TRANSCRIBING
+        _voiceTranscript.value = "Preparing microphone..."
+        voiceJob = viewModelScope.launch {
+            try {
+                val selectedRuntime = withTimeout(VOICE_TIMEOUT_MS) {
+                    backgroundOperation {
+                        speechMutex.withLock {
+                            val preferredOrder = if (_selectedSttEngine.value == SpeechToTextEngine.MOONSHINE_TINY) {
+                                listOf(SpeechToTextEngine.MOONSHINE_TINY, SpeechToTextEngine.WHISPER_BASE)
+                            } else {
+                                listOf(SpeechToTextEngine.WHISPER_BASE, SpeechToTextEngine.MOONSHINE_TINY)
+                            }
+                            preferredOrder.firstOrNull { engine ->
+                                when (engine) {
+                                    SpeechToTextEngine.MOONSHINE_TINY -> prepareMoonshineEngine()
+                                    SpeechToTextEngine.WHISPER_BASE -> prepareWhisperEngine()
+                                }
+                            }
+                        }
+                    }
                 }
-                if (ready) {
-                    selectedRuntime = engine
-                    break
+                checkNotNull(selectedRuntime) { "Install Moonshine Tiny or Whisper Base.en to use voice input." }
+                currentCoroutineContext().ensureActive()
+                activeListeningSttEngine = selectedRuntime
+                audioRecorder.startRecording(viewModelScope)
+                check(audioRecorder.isRecording.value) { "Unable to start the microphone. Check microphone permission." }
+                _voiceTranscript.value = ""
+                _voiceState.value = VoiceState.LISTENING
+            } catch (e: TimeoutCancellationException) {
+                if (session == voiceSession) showVoiceError("Voice initialization timed out. Please try again.")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (session == voiceSession) showVoiceError(e.localizedMessage ?: "Unable to start voice input.")
+            } finally {
+                if (session == voiceSession) {
+                    voiceJob = null
+                    if (_voiceState.value == VoiceState.TRANSCRIBING) _voiceState.value = VoiceState.IDLE
                 }
             }
-
-            if (selectedRuntime == null) {
-                _voiceTranscript.value = "Install Moonshine Tiny or Whisper Base.en to use voice input."
-                _voiceState.value = VoiceState.ERROR
-                return@launch
-            }
-
-            if (selectedRuntime != _selectedSttEngine.value) {
-                _selectedSttEngine.value = selectedRuntime
-            }
-
-            activeListeningSttEngine = selectedRuntime
-
-            _voiceTranscript.value = ""
-            _voiceState.value = VoiceState.LISTENING
-            audioRecorder.startRecording(viewModelScope)
         }
     }
 
     fun stopVoiceListening() {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (_voiceState.value != VoiceState.LISTENING) {
-                return@launch
-            }
-
-            _voiceState.value = VoiceState.TRANSCRIBING
-            val pcmAudio = audioRecorder.stopRecording()
-            val transcript = when (activeListeningSttEngine) {
-                SpeechToTextEngine.MOONSHINE_TINY -> moonshineEngine.transcribe(pcmAudio)
-                SpeechToTextEngine.WHISPER_BASE -> whisperEngine.transcribe(pcmAudio)
-            }
-
-            _voiceTranscript.value = transcript
-            if (transcript.isNotBlank()) {
-                val quickAction = detectFastCommand(transcript)
-                if (quickAction != null) {
-                    _voiceState.value = VoiceState.ACTION_EXECUTING
-                    val result = executeActionSafely(quickAction, source = "voice_fast_command")
-                    _voiceTranscript.value = result.message
-                    _voiceState.value = VoiceState.SPEAKING
-                    ttsManager.speak(result.message)
-                } else {
-                    _voiceState.value = VoiceState.THINKING
-                    sendMessage(transcript, isVoice = true)
+        if (_voiceState.value != VoiceState.LISTENING) return
+        val session = ++voiceSession
+        _voiceState.value = VoiceState.TRANSCRIBING
+        val pcmAudio = audioRecorder.stopRecording()
+        voiceJob = viewModelScope.launch {
+            try {
+                val transcript = withTimeout(VOICE_TIMEOUT_MS) {
+                    backgroundOperation {
+                        speechMutex.withLock {
+                            when (activeListeningSttEngine) {
+                                SpeechToTextEngine.MOONSHINE_TINY -> moonshineEngine.transcribe(pcmAudio)
+                                SpeechToTextEngine.WHISPER_BASE -> whisperEngine.transcribe(pcmAudio)
+                            }
+                        }
+                    }
                 }
-            } else {
-                _voiceState.value = VoiceState.ERROR
-                _voiceTranscript.value = "No speech detected."
+                currentCoroutineContext().ensureActive()
+                check(transcript.isNotBlank()) { "No speech detected." }
+                _voiceTranscript.value = transcript
+                _voiceState.value = VoiceState.IDLE
+                // Voice and keyboard input share exactly one response/action pipeline.
+                sendMessage(transcript, isVoice = true)
+            } catch (e: TimeoutCancellationException) {
+                if (session == voiceSession) showVoiceError("Speech recognition timed out. Please try again.")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (session == voiceSession) showVoiceError(e.localizedMessage ?: "Speech recognition failed.")
+            } finally {
+                if (session == voiceSession) {
+                    voiceJob = null
+                    if (_voiceState.value == VoiceState.TRANSCRIBING) _voiceState.value = VoiceState.IDLE
+                }
             }
         }
     }
 
     fun cancelVoice() {
+        ++voiceSession
+        voiceJob?.cancel()
+        voiceJob = null
         audioRecorder.stopRecording()
+        stopGeneration()
+        stopSpeaking()
         _voiceState.value = VoiceState.IDLE
         _voiceTranscript.value = ""
+    }
+
+    private fun showVoiceError(message: String) {
+        _voiceTranscript.value = message
+        _voiceState.value = VoiceState.ERROR
+    }
+
+    private suspend fun <T> backgroundOperation(block: suspend () -> T): T {
+        val task = backgroundTasks.async { block() }
+        try {
+            return task.await()
+        } finally {
+            task.cancel()
+        }
     }
 
     fun selectSpeechToTextEngine(engine: SpeechToTextEngine) {
@@ -671,111 +663,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return loaded
     }
 
-    private fun detectFastGreeting(text: String): String? {
-        val clean = text.trim().lowercase()
-            .removeSuffix("!").removeSuffix(".").removeSuffix("?").trim()
-        return when (clean) {
-            "hi", "hello", "hey", "hiya", "howdy", "good morning", "good afternoon", "good evening" -> {
-                "Hello! How can I help you today?"
-            }
-            "how are you", "how are you doing", "how's it going" -> {
-                "I am doing great! Ready to help you with anything you need."
-            }
-            "who are you", "what are you" -> {
-                "I am MyAI, your private, high-performance offline AI assistant running locally on your device."
-            }
-            else -> null
+    fun executeAction(action: AssistantAction) {
+        if (ActionValidator.validate(action) !is ActionValidator.ValidationResult.Valid) return
+        val explicitRequest = when (action.type) {
+            com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE -> "Open YouTube"
+            com.myai.offline.data.model.AssistantActionType.OPEN_CHROME -> "Open Chrome"
+            com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS -> "Open Settings"
+            com.myai.offline.data.model.AssistantActionType.OPEN_APP -> "Open ${action.appName} app"
+            com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE -> "Search YouTube for ${action.query}"
+            else -> return
         }
-    }
-
-    private fun detectFastMath(text: String): String? {
-        val trimmed = text.trim()
-        if (trimmed.isBlank()) return null
-
-        var expr = trimmed.lowercase()
-            .removePrefix("what is").removePrefix("what's")
-            .removePrefix("calculate").removePrefix("solve").removePrefix("compute")
-            .removeSuffix("?").removeSuffix("=").trim()
-
-        if (expr.isBlank() || !expr.any { it.isDigit() }) return null
-
-        val hasOperator = expr.contains('+') || expr.contains('-') || expr.contains('*') ||
-                          expr.contains('/') || expr.contains('x') || expr.contains('×') ||
-                          expr.contains('÷') || expr.contains('%') || expr.contains('^')
-        if (!hasOperator) return null
-
-        val cleanExpr = expr.replace("×", "*").replace("÷", "/").replace("x", "*")
-        if (!cleanExpr.all { it.isDigit() || it.isWhitespace() || it in "+-*/%^()." }) {
-            return null
-        }
-
-        val result = SimpleMathEvaluator.evaluate(cleanExpr) ?: return null
-        val formattedResult = if (result % 1.0 == 0.0 && Math.abs(result) < Long.MAX_VALUE) {
-            result.toLong().toString()
-        } else {
-            String.format(java.util.Locale.US, "%.4f", result).trimEnd('0').trimEnd('.')
-        }
-        return "$trimmed = $formattedResult"
-    }
-
-    private fun detectFastCommand(transcript: String): AssistantAction? {
-        val normalized = transcript.trim().lowercase()
-        if (normalized.isBlank()) return null
-
-        // 1. YouTube Search: "search youtube for <query>", "play <query> on youtube"
-        val youtubeSearch = Regex("^(?:search\\s+(?:on\\s+)?youtube\\s+(?:for\\s+)?|youtube\\s+search\\s+(?:for\\s+)?|play\\s+(.+?)\\s+on\\s+youtube|watch\\s+(.+?)\\s+on\\s+youtube)(.*)$", RegexOption.IGNORE_CASE)
-            .find(normalized)
-        if (youtubeSearch != null) {
-            val q = (youtubeSearch.groupValues[1].ifBlank { youtubeSearch.groupValues[2] }.ifBlank { youtubeSearch.groupValues[3] }).trim()
-            if (q.isNotBlank()) {
-                return AssistantAction(
-                    type = com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE,
-                    query = q
-                )
-            }
-        }
-
-        // 2. Web Search: "search web for <query>", "google <query>"
-        val webSearch = Regex("^(?:web\\s+search\\s+for|search\\s+(?:the\\s+)?web\\s+for|google\\s+for|google)\\s+(.+)$", RegexOption.IGNORE_CASE)
-            .find(normalized)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.trim()
-        if (!webSearch.isNullOrBlank()) {
-            val encodedQuery = Uri.encode(webSearch)
-            return AssistantAction(
-                type = com.myai.offline.data.model.AssistantActionType.OPEN_URL,
-                url = "https://www.google.com/search?q=$encodedQuery"
-            )
-        }
-
-        // 3. Generic App Launch: "open <app>", "launch <app>", "start <app>", "run <app>", "go to <app>"
-        val openAppRegex = Regex("^(?:please\\s+)?(?:open|launch|start|run|go\\s+to)\\s+(?:the\\s+)?(.+?)(?:\\s+app)?$", RegexOption.IGNORE_CASE)
-        val openMatch = openAppRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
-        val targetApp = openMatch ?: if (normalized.startsWith("open ")) normalized.removePrefix("open ").trim() else null
-
-        if (!targetApp.isNullOrBlank()) {
-            val app = targetApp.lowercase()
-            return when {
-                app == "youtube" || app == "yt" -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE)
-                app == "chrome" || app == "browser" || app == "google chrome" || app == "internet" -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_CHROME)
-                app == "settings" || app == "phone settings" || app == "system settings" -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS)
-                else -> AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_APP, appName = targetApp)
-            }
-        }
-
-        // Direct app names without "open"
-        if (normalized == "youtube") return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE)
-        if (normalized == "settings") return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS)
-        if (normalized == "chrome" || normalized == "browser") return AssistantAction(type = com.myai.offline.data.model.AssistantActionType.OPEN_CHROME)
-
-        return null
-    }
-
-    fun executeAction(action: AssistantAction, source: String = "ui_action_card") {
-        viewModelScope.launch(Dispatchers.IO) {
-            executeActionSafely(action, source)
-        }
+        sendMessage(explicitRequest)
     }
 
     private suspend fun executeActionSafely(
@@ -787,66 +685,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "[ACTION_EXEC_START] source=$source type=${action.type} query=${action.query} app=${action.appName} url=${action.url}"
         )
 
-        return try {
-            val outcome = withTimeout(ACTION_EXECUTION_TIMEOUT_MS) {
-                withContext(Dispatchers.Main) {
-                    actionHandler.execute(action)
-                }
-            }
-
-            if (outcome.success) {
-                Log.i(TAG, "[ACTION_EXEC_COMPLETE] source=$source type=${action.type} message=${outcome.message}")
-            } else {
-                Log.e(TAG, "[ACTION_EXEC_FAILURE] source=$source type=${action.type} message=${outcome.message}")
-            }
-            outcome
-        } catch (timeout: TimeoutCancellationException) {
-            val timeoutMsg = "Action execution timed out. Please try again."
-            Log.e(TAG, "[ACTION_EXEC_FAILURE] source=$source type=${action.type} reason=timeout", timeout)
-            AndroidActionHandler.ExecutionOutcome(success = false, message = timeoutMsg)
-        } catch (e: Exception) {
-            val failMsg = "Unable to execute command: ${e.localizedMessage ?: "unknown error"}"
-            Log.e(TAG, "[ACTION_EXEC_FAILURE] source=$source type=${action.type} reason=${e.message}", e)
-            AndroidActionHandler.ExecutionOutcome(success = false, message = failMsg)
+        return backgroundOperation {
+            actionHandler.execute(action)
         }
-    }
-
-    private fun shouldAutoExecuteModelAction(userQuery: String, action: AssistantAction): Boolean {
-        if (detectFastCommand(userQuery) != null) {
-            return true
-        }
-
-        val normalized = userQuery.trim().lowercase()
-        val openIntent = Regex("\\b(open|launch|start|run|go\\s+to)\\b")
-        val searchIntent = Regex("\\b(search|find|look\\s+up|play|watch)\\b")
-
-        return when (action.type) {
-            com.myai.offline.data.model.AssistantActionType.OPEN_YOUTUBE -> {
-                normalized.contains("youtube") && (openIntent.containsMatchIn(normalized) || searchIntent.containsMatchIn(normalized))
-            }
-            com.myai.offline.data.model.AssistantActionType.SEARCH_YOUTUBE -> {
-                normalized.contains("youtube") && searchIntent.containsMatchIn(normalized)
-            }
-            com.myai.offline.data.model.AssistantActionType.OPEN_CHROME -> {
-                normalized.contains("chrome") && openIntent.containsMatchIn(normalized)
-            }
-            com.myai.offline.data.model.AssistantActionType.OPEN_SETTINGS -> {
-                normalized.contains("settings") && openIntent.containsMatchIn(normalized)
-            }
-            com.myai.offline.data.model.AssistantActionType.OPEN_APP -> {
-                openIntent.containsMatchIn(normalized)
-            }
-            com.myai.offline.data.model.AssistantActionType.OPEN_URL -> {
-                searchIntent.containsMatchIn(normalized) || normalized.contains("http://") || normalized.contains("https://")
-            }
-            else -> false
-        }
-    }
-
-    private fun previewForLog(value: String, maxLen: Int = 400): String {
-        if (value.isBlank()) return "<blank>"
-        val singleLine = value.replace("\n", "\\n")
-        return if (singleLine.length <= maxLen) singleLine else singleLine.take(maxLen) + "..."
     }
 
     fun speakMessage(messageId: String, content: String) {
@@ -890,19 +731,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteModel(modelId: ModelId) {
+        cancelVoice()
         viewModelScope.launch(Dispatchers.IO) {
             val modelInfo = modelRepository.getModel(modelId)
             if (llmEngine.currentLoadedModel?.id == modelId) {
                 llmEngine.unloadModel()
             }
-            if (modelId == ModelId.WHISPER_BASE && whisperEngine.isModelLoaded) {
-                whisperEngine.unloadModel()
-            }
-            if (modelId == ModelId.MOONSHINE_TINY_EN && moonshineEngine.isModelLoaded) {
-                moonshineEngine.unloadModel()
-            }
-            if (modelId == ModelId.KOKORO_EN_INT8) {
-                ttsManager.unloadKokoroModel()
+            speechMutex.withLock {
+                if (modelId == ModelId.WHISPER_BASE && whisperEngine.isModelLoaded) {
+                    whisperEngine.unloadModel()
+                }
+                if (modelId == ModelId.MOONSHINE_TINY_EN && moonshineEngine.isModelLoaded) {
+                    moonshineEngine.unloadModel()
+                }
+                if (modelId == ModelId.KOKORO_EN_INT8) {
+                    ttsManager.unloadKokoroModel()
+                }
             }
 
             modelRepository.deleteModel(modelId)
@@ -920,14 +764,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun insertAssistantMessage(conversationId: String, content: String) {
+    private suspend fun insertAssistantMessage(
+        conversationId: String,
+        content: String,
+        messageId: String = UUID.randomUUID().toString(),
+        metrics: InferenceMetrics? = null,
+        action: AssistantAction? = null,
+        timestamp: Long = System.currentTimeMillis()
+    ) {
+        val completedAction = action?.takeIf { it.executed }
         val message = MessageEntity(
-            id = UUID.randomUUID().toString(),
+            id = messageId,
             conversationId = conversationId,
             role = "assistant",
-            content = content
+            content = content,
+            timestamp = timestamp,
+            metricsJson = metrics?.let {
+                JSONObject().put("timeToFirstTokenMs", it.timeToFirstTokenMs)
+                    .put("tokensPerSec", it.tokensPerSec).put("totalTokens", it.totalTokens)
+                    .put("totalGenTimeMs", it.totalGenTimeMs).toString()
+            },
+            actionType = completedAction?.type?.rawValue,
+            actionDataJson = completedAction?.let {
+                JSONObject().put("action", it.type.rawValue).apply {
+                    it.appName?.let { name -> put("appName", name) }
+                    it.query?.let { query -> put("query", query) }
+                }.toString()
+            }
         )
-        messageDao.insertMessage(message)
+        db.withTransaction {
+            messageDao.insertMessage(message)
+            conversationDao.getConversationById(conversationId)?.let { parent ->
+                conversationDao.updateConversation(parent.copy(updatedAt = System.currentTimeMillis()))
+            }
+        }
     }
 
     private fun recommendedThreadCount(): Int {
@@ -951,17 +821,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { llmEngine.unloadModel() }
-            runCatching { whisperEngine.unloadModel() }
-            runCatching { moonshineEngine.unloadModel() }
+        voiceJob?.cancel()
+        audioRecorder.stopRecording()
+        backgroundTasks.cancel()
+        llmEngine.close()
+        // viewModelScope is already cancelled in onCleared; use a cleanup owner and wait
+        // for speech calls to finish before freeing their native contexts.
+        CoroutineScope(Dispatchers.IO).launch {
+            viewModelScope.coroutineContext[Job]?.join()
+            backgroundTasks.coroutineContext[Job]?.join()
+            speechMutex.withLock {
+                runCatching { whisperEngine.unloadModel() }
+                runCatching { moonshineEngine.unloadModel() }
+            }
         }
         ttsManager.shutdown()
     }
 
     companion object {
-        private const val DEFAULT_RUNTIME_CONTEXT = 2048 // 2048 context size guarantees fast 1-2s response latency on mobile
+        private const val DEFAULT_RUNTIME_CONTEXT = 2048
         private const val DUPLICATE_WINDOW_MS = 800L
-        private const val ACTION_EXECUTION_TIMEOUT_MS = 8_000L
+        private const val MODEL_LOAD_TIMEOUT_MS = 120_000L
+        private const val REQUEST_TIMEOUT_MS = 150_000L
+        private const val SAVE_TIMEOUT_MS = 5_000L
+        private const val VOICE_TIMEOUT_MS = 60_000L
     }
 }

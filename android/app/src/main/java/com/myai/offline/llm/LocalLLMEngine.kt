@@ -8,27 +8,53 @@ import com.myai.offline.data.model.ModelInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class LocalLLMEngine(
     private val context: Context
 ) : ILocalLLMEngine {
 
     private val TAG = "LocalLLMEngine"
-    private var activeModelHandle: Long = 0L
-    private var loadedModel: ModelInfo? = null
-    private val isGenerating = AtomicBoolean(false)
-    private var activeInferenceJob: Job? = null
+    @Volatile private var activeModelHandle: Long = 0L
+    @Volatile private var loadedModel: ModelInfo? = null
+    private val nativeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    companion object {
+        // llama.cpp's active model is process-global, including across ViewModel recreation.
+        private val nativeMutex = Mutex()
+    }
+    private val generationLock = Any()
+    private class Generation {
+        val stopped = AtomicBoolean(false)
+    }
+    private val activeGeneration = AtomicReference<Generation?>(null)
+    private var runningGeneration: Generation? = null
+
+    // Blocking JNI work has a serialized owner. Cancelling an await releases the UI immediately;
+    // native resources remain owned until the native call actually returns.
+    private suspend fun <T> nativeOperation(block: suspend () -> T): T {
+        val task = nativeScope.async { nativeMutex.withLock { block() } }
+        try {
+            return task.await()
+        } finally {
+            if (!currentCoroutineContext().isActive) task.cancel()
+        }
+    }
 
     override val isModelLoaded: Boolean
         get() = activeModelHandle != 0L && loadedModel != null
@@ -37,13 +63,13 @@ class LocalLLMEngine(
         get() = loadedModel
 
     override suspend fun loadModel(model: ModelInfo, threads: Int, ctxSize: Int): Long =
-        withContext(Dispatchers.IO) {
+        nativeOperation {
             val startTime = System.currentTimeMillis()
             Log.i(TAG, "[MODEL_LOAD_START] Loading model: ${model.name} (${model.quant})")
 
             // If another model is currently loaded, unload it first
             if (activeModelHandle != 0L || loadedModel != null) {
-                unloadModel()
+                unloadNativeModel()
             }
 
             val modelFile = resolveModelFile(model)
@@ -73,41 +99,45 @@ class LocalLLMEngine(
                 throw IllegalStateException(errorMsg)
             }
 
-            if (!NativeLlamaBridge.nativeIsModelLoaded(handle)) {
+            try {
+                currentCoroutineContext().ensureActive()
+                check(NativeLlamaBridge.nativeIsModelLoaded(handle)) { "llama.cpp context creation failed for ${model.name}." }
+                if (!runInferenceReadinessProbe(handle)) {
+                    Log.w(TAG, "[MODEL_LOAD_WARN] Warmup emitted no token for ${model.name}.")
+                }
+                currentCoroutineContext().ensureActive()
+                activeModelHandle = handle
+                loadedModel = model
+            } catch (t: Throwable) {
                 NativeLlamaBridge.nativeUnloadModel(handle)
-                val errorMsg = "llama.cpp context creation failed for ${model.name}."
-                Log.e(TAG, "[CONTEXT_CREATE_FAILED] $errorMsg")
-                throw IllegalStateException(errorMsg)
+                throw t
             }
-
-            val readinessProbeOk = runInferenceReadinessProbe(handle)
-            if (!readinessProbeOk) {
-                Log.w(TAG, "[MODEL_LOAD_WARN] Inference readiness probe emitted no token during warmup for ${model.name}, but native handle is valid.")
-            }
-
-            Log.i(TAG, "[CONTEXT_CREATE_SUCCESS] Context created for ${model.name}")
-
-            activeModelHandle = handle
-            loadedModel = model
             val loadDuration = System.currentTimeMillis() - startTime
             Log.i(TAG, "[MODEL_LOAD_SUCCESS] Model ${model.name} loaded in ${loadDuration}ms (handle: $activeModelHandle)")
             loadDuration
         }
 
     override suspend fun unloadModel() {
-        withContext(Dispatchers.IO) {
-            if (isGenerating.get()) {
-                stopGeneration()
+        stopGeneration()
+        nativeOperation { unloadNativeModel() }
+    }
+
+    private fun unloadNativeModel() {
+        if (activeModelHandle != 0L && NativeLlamaBridge.isAvailable()) {
+            NativeLlamaBridge.nativeUnloadModel(activeModelHandle)
+        }
+        activeModelHandle = 0L
+        loadedModel = null
+    }
+
+    override fun close() {
+        stopGeneration()
+        nativeScope.launch {
+            try {
+                nativeMutex.withLock { unloadNativeModel() }
+            } finally {
+                nativeScope.cancel()
             }
-            if (activeModelHandle != 0L) {
-                Log.i(TAG, "Unloading native model handle: $activeModelHandle")
-                if (NativeLlamaBridge.isAvailable()) {
-                    NativeLlamaBridge.nativeUnloadModel(activeModelHandle)
-                }
-                activeModelHandle = 0L
-            }
-            loadedModel = null
-            Log.i(TAG, "Model unloaded successfully")
         }
     }
 
@@ -160,13 +190,15 @@ class LocalLLMEngine(
     }
 
     override fun stopGeneration() {
-        if (isGenerating.get()) {
-            Log.i(TAG, "Stopping active generation")
-            isGenerating.set(false)
-            if (NativeLlamaBridge.isAvailable()) {
+        activeGeneration.getAndSet(null)?.let { stopNativeGeneration(it) }
+    }
+
+    private fun stopNativeGeneration(generation: Generation) {
+        generation.stopped.set(true)
+        synchronized(generationLock) {
+            if (runningGeneration === generation && NativeLlamaBridge.isAvailable()) {
                 NativeLlamaBridge.nativeStopGeneration()
             }
-            activeInferenceJob?.cancel()
         }
     }
 
@@ -213,65 +245,54 @@ class LocalLLMEngine(
             return@flow
         }
 
-        if (!isGenerating.compareAndSet(false, true)) {
-            Log.w(TAG, "Inference already in progress. Ignoring duplicate request.")
-            emit("Generation is already in progress.")
-            return@flow
-        }
+        val generation = Generation()
+        check(activeGeneration.compareAndSet(null, generation)) { "Generation is already in progress." }
 
         val startTime = System.currentTimeMillis()
         var timeToFirstToken = 0L
         var tokenCount = 0
         Log.i(TAG, "[INFERENCE_START] Model: ${model.name}, maxTokens: $maxTokens, promptLength: ${prompt.length}")
 
+        val tokenChannel = Channel<String>(capacity = Channel.UNLIMITED)
+        val worker = nativeScope.async {
+            nativeMutex.withLock {
+                currentCoroutineContext().ensureActive()
+                check(activeModelHandle == handle) { "The active model changed before generation started." }
+                synchronized(generationLock) {
+                    if (generation.stopped.get()) throw CancellationException("Response stopped")
+                    runningGeneration = generation
+                }
+                try {
+                    NativeLlamaBridge.nativeGenerate(
+                        modelHandle = handle,
+                        prompt = prompt,
+                        maxTokens = maxTokens,
+                        callback = LlamaTokenCallback { token ->
+                            !generation.stopped.get() && tokenChannel.trySend(token).isSuccess
+                        }
+                    )
+                } finally {
+                    synchronized(generationLock) {
+                        if (runningGeneration === generation) runningGeneration = null
+                    }
+                }
+            }
+        }
+        worker.invokeOnCompletion { cause -> tokenChannel.close(cause) }
+
         try {
-            val tokenChannel = Channel<String>(capacity = Channel.UNLIMITED)
-            var nativeReturnCode = 0
-
-            coroutineScope {
-                val backgroundInferenceJob = launch(Dispatchers.IO) {
-                    try {
-                        nativeReturnCode = NativeLlamaBridge.nativeGenerate(
-                            modelHandle = handle,
-                            prompt = prompt,
-                            maxTokens = maxTokens,
-                            callback = LlamaTokenCallback { token ->
-                                if (!isGenerating.get()) {
-                                    return@LlamaTokenCallback false
-                                }
-                                tokenChannel.trySend(token)
-                                true
-                            }
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Native generate execution error", e)
-                    } finally {
-                        tokenChannel.close()
-                    }
+            for (token in tokenChannel) {
+                if (generation.stopped.get()) throw CancellationException("Response stopped")
+                if (tokenCount == 0) {
+                    timeToFirstToken = System.currentTimeMillis() - startTime
+                    Log.i(TAG, "[FIRST_TOKEN] TTFT: ${timeToFirstToken}ms")
                 }
-                activeInferenceJob = backgroundInferenceJob
-
-                for (token in tokenChannel) {
-                    if (!isGenerating.get()) {
-                        NativeLlamaBridge.nativeStopGeneration()
-                        backgroundInferenceJob.cancel()
-                        break
-                    }
-                    if (tokenCount == 0) {
-                        timeToFirstToken = System.currentTimeMillis() - startTime
-                        Log.i(TAG, "[FIRST_TOKEN] TTFT: ${timeToFirstToken}ms")
-                    }
-                    tokenCount++
-                    emit(token)
-                }
-
-                backgroundInferenceJob.join()
+                tokenCount++
+                emit(token)
             }
 
-            if (!isGenerating.get()) {
-                Log.i(TAG, "[INFERENCE_CANCELLED] Inference completed early due to stop request.")
-                return@flow
-            }
+            val nativeReturnCode = worker.await()
+            if (generation.stopped.get()) throw CancellationException("Response stopped")
 
             if (nativeReturnCode < 0) {
                 val error = "Native inference failed (returnCode=$nativeReturnCode)."
@@ -301,14 +322,15 @@ class LocalLLMEngine(
 
         } catch (e: CancellationException) {
             Log.i(TAG, "[GENERATION_CANCELLED] Inference job was cancelled.")
-            NativeLlamaBridge.nativeStopGeneration()
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "[INFERENCE_ERROR] Error during native LLM inference", e)
-            emit("\n[Inference error: ${e.localizedMessage}]")
+            throw e
         } finally {
-            NativeLlamaBridge.nativeStopGeneration()
-            isGenerating.set(false)
-            activeInferenceJob = null
+            stopNativeGeneration(generation)
+            worker.cancel()
+            tokenChannel.cancel()
+            activeGeneration.compareAndSet(generation, null)
         }
     }.flowOn(Dispatchers.IO)
 }

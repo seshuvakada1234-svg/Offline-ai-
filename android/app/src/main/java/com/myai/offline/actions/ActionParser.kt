@@ -4,105 +4,52 @@ import com.myai.offline.data.model.ActionParseResult
 import com.myai.offline.data.model.AssistantAction
 import com.myai.offline.data.model.AssistantActionType
 import org.json.JSONObject
-import java.util.regex.Pattern
 
 object ActionParser {
-
-    private val JSON_BLOCK_PATTERN = Pattern.compile("```(?:json)?\\s*([\\s\\S]*?)\\s*```", Pattern.CASE_INSENSITIVE)
-    private val INLINE_JSON_PATTERN = Pattern.compile("\\{\\s*\"action\"\\s*:\\s*\"[A-Z_]+\"[^}]*\\}", Pattern.CASE_INSENSITIVE)
-    private val THINK_BLOCK_PATTERN = Pattern.compile("<think>([\\s\\S]*?)</think>", Pattern.CASE_INSENSITIVE)
-    private val ACTION_KEY_PATTERN = Pattern.compile("\"action\"\\s*:", Pattern.CASE_INSENSITIVE)
+    private val actionFence = Regex("\\A```(?:json)?[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n```\\z", RegexOption.IGNORE_CASE)
+    private val jsonString = """"(?:[^"\\\x00-\x1f]++|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*""""
+    private val member = Regex("[ \\t\\r\\n]*($jsonString)[ \\t\\r\\n]*:[ \\t\\r\\n]*($jsonString)[ \\t\\r\\n]*")
 
     /**
-     * Parses generated LLM response tokens/text to extract structured action payloads.
+     * Accepts one standalone action object, optionally in a JSON fence. This only parses
+     * structure; the response pipeline decides whether the user requested an action.
      */
     fun parse(rawText: String): ActionParseResult {
-        var clean = rawText.trim()
-
-        // Strip internal thinking process tags if present
-        clean = THINK_BLOCK_PATTERN.matcher(clean).replaceAll("").trim()
-        clean = clean.replace(Regex("<think>[\\s\\S]*$"), "").trim()
-        val originalClean = clean
-
-        var rawJson: String? = null
-
-        // 1. Try markdown code fence
-        val fenceMatcher = JSON_BLOCK_PATTERN.matcher(clean)
-        if (fenceMatcher.find()) {
-            rawJson = fenceMatcher.group(1)?.trim()
-            clean = fenceMatcher.replaceAll("").trim()
-        } else {
-            // 2. Try inline raw JSON block
-            val inlineMatcher = INLINE_JSON_PATTERN.matcher(clean)
-            if (inlineMatcher.find()) {
-                rawJson = inlineMatcher.group(0)?.trim()
-                clean = inlineMatcher.replaceAll("").trim()
-            }
-        }
-
-        if (rawJson.isNullOrBlank()) {
-            return ActionParseResult(
-                hasAction = false,
-                action = null,
-                cleanText = clean,
-                isMalformed = false,
-                rawActionBlock = null
-            )
-        }
-
-        if (!ACTION_KEY_PATTERN.matcher(rawJson).find()) {
-            return ActionParseResult(
-                hasAction = false,
-                action = null,
-                cleanText = originalClean,
-                isMalformed = false,
-                rawActionBlock = null
-            )
-        }
+        val plain = ActionParseResult(hasAction = false, cleanText = rawText)
+        val trimmed = rawText.trim()
+        val rawJson = actionFence.matchEntire(trimmed)?.groupValues?.get(1)?.trim()
+            ?: trimmed.takeIf { it.startsWith("{") } ?: return plain
 
         return try {
-            val json = JSONObject(rawJson)
-            val actionStr = if (json.has("action")) json.optString("action") else ""
-            val type = AssistantActionType.fromString(actionStr)
-
-            if (type == null) {
-                ActionParseResult(
-                    hasAction = false,
-                    action = null,
-                    cleanText = originalClean,
-                    isMalformed = true,
-                    rawActionBlock = rawJson
-                )
-            } else {
-                val action = AssistantAction(
-                    type = type,
-                    appName = json.optString("appName").takeIf { it.isNotBlank() },
-                    url = json.optString("url").takeIf { it.isNotBlank() },
-                    query = json.optString("query").takeIf { it.isNotBlank() },
-                    phoneNumber = json.optString("phoneNumber").takeIf { it.isNotBlank() },
-                    messageText = json.optString("messageText").takeIf { it.isNotBlank() },
-                    requiresConfirmation = when (type) {
-                        AssistantActionType.MAKE_CALL, AssistantActionType.SEND_SMS -> true
-                        else -> false
-                    }
-                )
-
-                ActionParseResult(
-                    hasAction = true,
-                    action = action,
-                    cleanText = clean,
-                    isMalformed = false,
-                    rawActionBlock = rawJson
-                )
+            // Android's JSONObject also accepts non-JSON syntax (single quotes, comments,
+            // unquoted names and trailing commas). Check the flat string-only grammar first.
+            require(rawJson.length <= 4096 && rawJson.startsWith("{") && rawJson.endsWith("}"))
+            var offset = 1
+            var memberCount = 0
+            while (offset < rawJson.lastIndex) {
+                val match = member.find(rawJson, offset)
+                require(match != null && match.range.first == offset) { "Invalid JSON member" }
+                memberCount++
+                offset = match.range.last + 1
+                if (offset == rawJson.lastIndex) break
+                require(rawJson.getOrNull(offset) == ',') { "Expected a comma" }
+                offset++
+                require(offset < rawJson.lastIndex) { "Trailing comma" }
             }
-        } catch (e: Exception) {
-            ActionParseResult(
-                hasAction = false,
-                action = null,
-                cleanText = originalClean,
-                isMalformed = true,
-                rawActionBlock = rawJson
+            val json = JSONObject(rawJson)
+            require(json.length() == memberCount) { "Duplicate JSON member" }
+            if (!json.has("action")) return plain
+            require(json.keys().asSequence().all { it in setOf("action", "appName", "query") }) { "Unexpected action field" }
+            val type = requireNotNull(AssistantActionType.fromString(json.opt("action") as? String))
+            val action = AssistantAction(
+                type = type,
+                appName = json.opt("appName") as? String,
+                query = json.opt("query") as? String
             )
+            require(ActionValidator.validate(action) is ActionValidator.ValidationResult.Valid) { "Invalid action parameters" }
+            ActionParseResult(hasAction = true, action = action, cleanText = "", rawActionBlock = rawJson)
+        } catch (e: Exception) {
+            plain.copy(isMalformed = true, rawActionBlock = rawJson)
         }
     }
 }

@@ -61,6 +61,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.myai.offline.assistant.ResponsePhase
 import com.myai.offline.data.database.MessageEntity
 import com.myai.offline.data.model.AssistantAction
 import com.myai.offline.data.model.ModelId
@@ -89,6 +90,7 @@ fun ChatScreen(
     messages: List<MessageEntity>,
     streamingMessage: String,
     isGenerating: Boolean,
+    responsePhase: ResponsePhase,
     composerText: String,
     models: List<ModelInfo>,
     selectedModelId: ModelId,
@@ -119,6 +121,11 @@ fun ChatScreen(
     val modelState = currentModel?.state ?: ModelState.NOT_INSTALLED
     val canChat = modelState == ModelState.READY || modelState == ModelState.ACTIVE
     val isModelActive = modelState == ModelState.ACTIVE
+    val loadingText = if (responsePhase == ResponsePhase.EXECUTING_ACTION) {
+        "Executing device action..."
+    } else {
+        "Generating response..."
+    }
 
     // Auto-scroll when new message arrives or streaming updates
     val totalCount = messages.size + if (isGenerating) 1 else 0
@@ -128,7 +135,7 @@ fun ChatScreen(
         }
     }
 
-    val showScrollToBottom by remember {
+    val showScrollToBottom by remember(totalCount) {
         derivedStateOf {
             listState.firstVisibleItemIndex < totalCount - 3 && totalCount > 3
         }
@@ -284,7 +291,7 @@ fun ChatScreen(
                                 if (composerText.isEmpty()) {
                                     Text(
                                         text = when {
-                                            isGenerating -> "Generating response..."
+                                            isGenerating -> loadingText
                                             canChat -> "Ask anything..."
                                             modelState == ModelState.ERROR -> "Unable to load model. Check Engine Logs."
                                             else -> "Download ${currentModel?.name ?: "a model"} to chat."
@@ -327,7 +334,7 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            val canSend = composerText.isNotBlank() && canChat
+                            val canSend = composerText.isNotBlank()
                             IconButton(
                                 onClick = {
                                     if (canSend) {
@@ -400,6 +407,7 @@ fun ChatScreen(
                                     isSpeakingThis = false,
                                     modelName = currentModel?.name ?: "No model",
                                     isThinking = streamingMessage.isEmpty(),
+                                    loadingText = loadingText,
                                     onSpeakClick = {},
                                     onStopSpeakClick = {},
                                     onActionConfirm = {},
